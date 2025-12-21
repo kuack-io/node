@@ -1,0 +1,5 @@
+.idea/
+kuack-node
+coverage.*
+.DS_Store
+Thumbs.db

@@ -3,3 +3,4 @@ kuack-node
 coverage.*
 .DS_Store
 Thumbs.db
+test-output.log

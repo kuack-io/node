@@ -11,7 +11,7 @@ build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o kuack-node
 
 test:
-	go test -v -coverprofile=coverage.out ./...
+	go test -coverprofile=coverage.out ./...
 
 coverage:
 	go tool cover -html=coverage.out -o coverage.html

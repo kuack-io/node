@@ -75,7 +75,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          go test -v -coverprofile=coverage.out ./... | tee test-output.log
+          go test -coverprofile=coverage.out ./... | tee test-output.log
       - name: Generate Coverage HTML
         run: go tool cover -html=coverage.out -o coverage.html
       - name: Upload Coverage Report

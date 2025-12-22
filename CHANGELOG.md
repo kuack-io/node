@@ -1,3 +1,9 @@
+## [1.0.3](https://github.com/kuack-io/node/compare/1.0.2...1.0.3) (2025-12-22)
+
+### Dependencies
+
+* **deps:** bump golang.org/x/net from 0.19.0 to 0.38.0 ([ea0a7c8](https://github.com/kuack-io/node/commit/ea0a7c8f999262b2b141ef2b004ba85c8c529a1a))
+
 ## [1.0.2](https://github.com/kuack-io/node/compare/1.0.1...1.0.2) (2025-12-22)
 
 ### Dependencies

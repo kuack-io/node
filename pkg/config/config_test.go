@@ -3,6 +3,8 @@ package config_test
 import (
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"kuack-node/pkg/config"
@@ -23,6 +25,32 @@ func mustUnsetenv(key string) {
 	}
 }
 
+var envMu sync.Mutex //nolint:gochecknoglobals // shared env guard needed across parallel tests
+
+func lockEnv(t *testing.T) {
+	t.Helper()
+	envMu.Lock()
+	t.Cleanup(envMu.Unlock)
+}
+
+func uniqueEnvKey(t *testing.T, base string) string {
+	t.Helper()
+	sanitized := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= 'a' && r <= 'z':
+			return r - ('a' - 'A')
+		case r >= '0' && r <= '9':
+			return r
+		default:
+			return '_'
+		}
+	}, t.Name())
+
+	return base + "_" + sanitized
+}
+
 func TestGetEnv(t *testing.T) {
 	t.Parallel()
 
@@ -35,21 +63,21 @@ func TestGetEnv(t *testing.T) {
 	}{
 		{
 			name:         "environment variable set",
-			key:          "TEST_VAR",
+			key:          "TEST_VAR_MAIN",
 			value:        "test-value",
 			defaultValue: "default",
 			want:         "test-value",
 		},
 		{
 			name:         "environment variable not set",
-			key:          "NONEXISTENT_VAR",
+			key:          "NONEXISTENT_VAR_MAIN",
 			value:        "",
 			defaultValue: "default",
 			want:         "default",
 		},
 		{
 			name:         "environment variable empty string",
-			key:          "EMPTY_VAR",
+			key:          "EMPTY_VAR_MAIN",
 			value:        "",
 			defaultValue: "default",
 			want:         "default",
@@ -59,17 +87,19 @@ func TestGetEnv(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			key := uniqueEnvKey(t, tt.key)
+
 			// Clean up environment before test
-			mustUnsetenv(tt.key)
-			defer mustUnsetenv(tt.key)
+			mustUnsetenv(key)
+			defer mustUnsetenv(key)
 
 			if tt.value != "" {
-				mustSetenv(tt.key, tt.value)
+				mustSetenv(key, tt.value)
 			}
 
-			got := config.GetEnv(tt.key, tt.defaultValue)
+			got := config.GetEnv(key, tt.defaultValue)
 			if got != tt.want {
-				t.Errorf("GetEnv(%q, %q) = %q, want %q", tt.key, tt.defaultValue, got, tt.want)
+				t.Errorf("GetEnv(%q, %q) = %q, want %q", key, tt.defaultValue, got, tt.want)
 			}
 		})
 	}
@@ -87,56 +117,56 @@ func TestGetEnvBool(t *testing.T) {
 	}{
 		{
 			name:         "environment variable set to true",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "true",
 			defaultValue: false,
 			want:         true,
 		},
 		{
 			name:         "environment variable set to false",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "false",
 			defaultValue: true,
 			want:         false,
 		},
 		{
 			name:         "environment variable set to 1",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "1",
 			defaultValue: false,
 			want:         true,
 		},
 		{
 			name:         "environment variable set to TRUE (case insensitive)",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "TRUE",
 			defaultValue: false,
 			want:         true,
 		},
 		{
 			name:         "environment variable set to True (case insensitive)",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "True",
 			defaultValue: false,
 			want:         true,
 		},
 		{
 			name:         "environment variable set to FALSE (case insensitive)",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "FALSE",
 			defaultValue: true,
 			want:         false,
 		},
 		{
 			name:         "environment variable not set",
-			key:          "NONEXISTENT_BOOL",
+			key:          "NONEXISTENT_BOOL_MAIN",
 			value:        "",
 			defaultValue: true,
 			want:         true,
 		},
 		{
 			name:         "environment variable set to invalid value",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_MAIN",
 			value:        "invalid",
 			defaultValue: false,
 			want:         false,
@@ -146,17 +176,19 @@ func TestGetEnvBool(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			key := uniqueEnvKey(t, tt.key)
+
 			// Clean up environment before test
-			mustUnsetenv(tt.key)
-			defer mustUnsetenv(tt.key)
+			mustUnsetenv(key)
+			defer mustUnsetenv(key)
 
 			if tt.value != "" {
-				mustSetenv(tt.key, tt.value)
+				mustSetenv(key, tt.value)
 			}
 
-			got := config.GetEnvBool(tt.key, tt.defaultValue)
+			got := config.GetEnvBool(key, tt.defaultValue)
 			if got != tt.want {
-				t.Errorf("GetEnvBool(%q, %v) = %v, want %v", tt.key, tt.defaultValue, got, tt.want)
+				t.Errorf("GetEnvBool(%q, %v) = %v, want %v", key, tt.defaultValue, got, tt.want)
 			}
 		})
 	}
@@ -174,42 +206,42 @@ func TestGetEnvInt(t *testing.T) {
 	}{
 		{
 			name:         "environment variable set to valid integer",
-			key:          "TEST_INT",
+			key:          "TEST_INT_MAIN",
 			value:        "42",
 			defaultValue: 0,
 			want:         42,
 		},
 		{
 			name:         "environment variable set to zero",
-			key:          "TEST_INT",
+			key:          "TEST_INT_MAIN",
 			value:        "0",
 			defaultValue: 10,
 			want:         0,
 		},
 		{
 			name:         "environment variable set to negative integer",
-			key:          "TEST_INT",
+			key:          "TEST_INT_MAIN",
 			value:        "-5",
 			defaultValue: 0,
 			want:         -5,
 		},
 		{
 			name:         "environment variable not set",
-			key:          "NONEXISTENT_INT",
+			key:          "NONEXISTENT_INT_MAIN",
 			value:        "",
 			defaultValue: 100,
 			want:         100,
 		},
 		{
 			name:         "environment variable set to invalid value",
-			key:          "TEST_INT",
+			key:          "TEST_INT_MAIN",
 			value:        "not-a-number",
 			defaultValue: 50,
 			want:         50,
 		},
 		{
 			name:         "environment variable set to empty string",
-			key:          "TEST_INT",
+			key:          "TEST_INT_MAIN",
 			value:        "",
 			defaultValue: 25,
 			want:         25,
@@ -219,17 +251,19 @@ func TestGetEnvInt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			key := uniqueEnvKey(t, tt.key)
+
 			// Clean up environment before test
-			mustUnsetenv(tt.key)
-			defer mustUnsetenv(tt.key)
+			mustUnsetenv(key)
+			defer mustUnsetenv(key)
 
 			if tt.value != "" {
-				mustSetenv(tt.key, tt.value)
+				mustSetenv(key, tt.value)
 			}
 
-			got := config.GetEnvInt(tt.key, tt.defaultValue)
+			got := config.GetEnvInt(key, tt.defaultValue)
 			if got != tt.want {
-				t.Errorf("GetEnvInt(%q, %d) = %d, want %d", tt.key, tt.defaultValue, got, tt.want)
+				t.Errorf("GetEnvInt(%q, %d) = %d, want %d", key, tt.defaultValue, got, tt.want)
 			}
 		})
 	}
@@ -237,6 +271,7 @@ func TestGetEnvInt(t *testing.T) {
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
+	lockEnv(t)
 
 	// Test with default values
 	mustUnsetenv("NODE_NAME")
@@ -329,10 +364,11 @@ func TestInitializeKlog(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+		tc := tt
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			// InitializeKlog should not panic for any verbosity value
-			config.InitializeKlog(tt.verbosity)
+			config.InitializeKlog(tc.verbosity)
 		})
 	}
 
@@ -378,21 +414,21 @@ func TestGetEnvBool_EdgeCases(t *testing.T) {
 	}{
 		{
 			name:         "value is 'True' (mixed case)",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_EDGE",
 			value:        "True",
 			defaultValue: false,
 			want:         true,
 		},
 		{
 			name:         "value is 'FaLsE' (mixed case)",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_EDGE",
 			value:        "FaLsE",
 			defaultValue: true,
 			want:         false,
 		},
 		{
 			name:         "value is '0'",
-			key:          "TEST_BOOL",
+			key:          "TEST_BOOL_EDGE",
 			value:        "0",
 			defaultValue: true,
 			want:         false, // strconv.ParseBool("0") returns false
@@ -402,15 +438,16 @@ func TestGetEnvBool_EdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			key := uniqueEnvKey(t, tt.key)
 
-			mustUnsetenv(tt.key)
-			defer mustUnsetenv(tt.key)
+			mustUnsetenv(key)
+			defer mustUnsetenv(key)
 
-			mustSetenv(tt.key, tt.value)
+			mustSetenv(key, tt.value)
 
-			got := config.GetEnvBool(tt.key, tt.defaultValue)
+			got := config.GetEnvBool(key, tt.defaultValue)
 			if got != tt.want {
-				t.Errorf("GetEnvBool(%q, %v) = %v, want %v", tt.key, tt.defaultValue, got, tt.want)
+				t.Errorf("GetEnvBool(%q, %v) = %v, want %v", key, tt.defaultValue, got, tt.want)
 			}
 		})
 	}
@@ -428,21 +465,21 @@ func TestGetEnvInt_EdgeCases(t *testing.T) {
 	}{
 		{
 			name:         "value is large positive integer",
-			key:          "TEST_INT",
+			key:          "TEST_INT_EDGE",
 			value:        "2147483647",
 			defaultValue: 0,
 			want:         2147483647,
 		},
 		{
 			name:         "value is large negative integer",
-			key:          "TEST_INT",
+			key:          "TEST_INT_EDGE",
 			value:        "-2147483648",
 			defaultValue: 0,
 			want:         -2147483648,
 		},
 		{
 			name:         "value has leading/trailing whitespace",
-			key:          "TEST_INT",
+			key:          "TEST_INT_EDGE",
 			value:        "  42  ",
 			defaultValue: 0,
 			want:         0, // Atoi doesn't trim, so it fails and returns default
@@ -452,15 +489,16 @@ func TestGetEnvInt_EdgeCases(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			key := uniqueEnvKey(t, tt.key)
 
-			mustUnsetenv(tt.key)
-			defer mustUnsetenv(tt.key)
+			mustUnsetenv(key)
+			defer mustUnsetenv(key)
 
-			mustSetenv(tt.key, tt.value)
+			mustSetenv(key, tt.value)
 
-			got := config.GetEnvInt(tt.key, tt.defaultValue)
+			got := config.GetEnvInt(key, tt.defaultValue)
 			if got != tt.want {
-				t.Errorf("GetEnvInt(%q, %d) = %d, want %d", tt.key, tt.defaultValue, got, tt.want)
+				t.Errorf("GetEnvInt(%q, %d) = %d, want %d", key, tt.defaultValue, got, tt.want)
 			}
 		})
 	}
@@ -469,7 +507,7 @@ func TestGetEnvInt_EdgeCases(t *testing.T) {
 func TestGetEnv_EmptyString(t *testing.T) {
 	t.Parallel()
 
-	key := "TEST_EMPTY"
+	key := uniqueEnvKey(t, "TEST_EMPTY")
 
 	mustUnsetenv(key)
 	defer mustUnsetenv(key)
@@ -485,6 +523,7 @@ func TestGetEnv_EmptyString(t *testing.T) {
 
 func TestLoadConfig_AllFields(t *testing.T) {
 	t.Parallel()
+	lockEnv(t)
 
 	// Test that all fields are properly loaded
 	mustSetenv("NODE_NAME", "test-node")
@@ -547,7 +586,7 @@ func TestGetEnvBool_WithStrconvParseBool(t *testing.T) {
 		t.Run("value_"+tc, func(t *testing.T) {
 			t.Parallel()
 
-			key := "TEST_BOOL_" + tc
+			key := uniqueEnvKey(t, "TEST_BOOL_"+tc)
 
 			mustUnsetenv(key)
 			defer mustUnsetenv(key)

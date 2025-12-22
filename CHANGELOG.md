@@ -1,3 +1,9 @@
+## [1.0.6](https://github.com/kuack-io/node/compare/1.0.5...1.0.6) (2025-12-22)
+
+### Bug Fixes
+
+* parallel-safe env test ([b0739d2](https://github.com/kuack-io/node/commit/b0739d25d4c4cca8d34d1fc1e053765aa34be21e))
+
 ## [1.0.5](https://github.com/kuack-io/node/compare/1.0.4...1.0.5) (2025-12-22)
 
 ### Dependencies

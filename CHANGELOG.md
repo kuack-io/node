@@ -1,3 +1,9 @@
+## [1.0.5](https://github.com/kuack-io/node/compare/1.0.4...1.0.5) (2025-12-22)
+
+### Dependencies
+
+* **deps:** bump k8s.io/client-go from 0.29.1 to 0.35.0 ([c41315f](https://github.com/kuack-io/node/commit/c41315fd29861528585a6ef32d23a6ffaa69379e))
+
 ## [1.0.4](https://github.com/kuack-io/node/compare/1.0.3...1.0.4) (2025-12-22)
 
 ### Dependencies

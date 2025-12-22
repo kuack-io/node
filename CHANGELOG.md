@@ -1,3 +1,9 @@
+## [1.0.4](https://github.com/kuack-io/node/compare/1.0.3...1.0.4) (2025-12-22)
+
+### Dependencies
+
+* **deps:** bump google.golang.org/protobuf from 1.31.0 to 1.33.0 ([b039d89](https://github.com/kuack-io/node/commit/b039d89b6b875ee97ee4ab0a70dfd245f15e9bd9))
+
 ## [1.0.3](https://github.com/kuack-io/node/compare/1.0.2...1.0.3) (2025-12-22)
 
 ### Dependencies

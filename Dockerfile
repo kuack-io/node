@@ -1,6 +1,6 @@
 FROM gcr.io/distroless/cc-debian12:nonroot
 
-COPY kuack-node /kuack-node
+COPY --chmod=755 kuack-node /kuack-node
 
 EXPOSE 4433/udp
 EXPOSE 10250/tcp

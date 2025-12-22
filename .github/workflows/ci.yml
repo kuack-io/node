@@ -162,7 +162,6 @@ jobs:
     name: Security
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
-    needs: build
     steps:
       - name: Checkout
         uses: actions/checkout@v6

@@ -59,7 +59,6 @@ func TestSetupComponents(t *testing.T) {
 		cfg := &config.Config{
 			NodeName:       "test-node",
 			ListenAddr:     ":0",
-			DisableTaint:   true,
 			KubeconfigPath: kubeconfigPath,
 			Verbosity:      0,
 		}
@@ -95,7 +94,6 @@ func TestSetupComponents(t *testing.T) {
 		cfg := &config.Config{
 			NodeName:       "test-node",
 			ListenAddr:     ":0",
-			DisableTaint:   true,
 			KubeconfigPath: kubeconfigPath,
 			Verbosity:      0,
 		}
@@ -116,7 +114,6 @@ func TestSetupComponents(t *testing.T) {
 		cfg := &config.Config{
 			NodeName:       "test-node",
 			ListenAddr:     ":0",
-			DisableTaint:   true,
 			KubeconfigPath: "/nonexistent/kubeconfig",
 			Verbosity:      0,
 		}
@@ -134,7 +131,7 @@ func TestStartHTTPServer(t *testing.T) {
 	t.Run("server starts successfully", func(t *testing.T) {
 		t.Parallel()
 
-		p, _ := provider.NewWASMProvider("test-node", false)
+		p, _ := provider.NewWASMProvider("test-node")
 
 		httpServer, err := httpserver.NewServer(&httpserver.Config{
 			ListenAddr: ":0",
@@ -170,7 +167,7 @@ func TestStartHTTPServer(t *testing.T) {
 	t.Run("server error is sent to channel", func(t *testing.T) {
 		t.Parallel()
 
-		p, _ := provider.NewWASMProvider("test-node", false)
+		p, _ := provider.NewWASMProvider("test-node")
 
 		// Create server with invalid address to force error
 		httpServer, err := httpserver.NewServer(&httpserver.Config{
@@ -211,7 +208,7 @@ func TestRunNodeController(t *testing.T) {
 		kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
 		mustWriteFile(kubeconfigPath, []byte(testKubeconfigContent), 0o600)
 
-		wasmProvider, _ := provider.NewWASMProvider("test-node", false)
+		wasmProvider, _ := provider.NewWASMProvider("test-node")
 
 		// Get a valid kubeClient
 		// The node controller will fail because test-server doesn't exist
@@ -237,7 +234,7 @@ func TestShutdownGracefully(t *testing.T) {
 	t.Run("shutdown with no error", func(t *testing.T) {
 		t.Parallel()
 
-		p, _ := provider.NewWASMProvider("test-node", false)
+		p, _ := provider.NewWASMProvider("test-node")
 
 		httpServer, err := httpserver.NewServer(&httpserver.Config{
 			ListenAddr: ":0",
@@ -263,7 +260,7 @@ func TestShutdownGracefully(t *testing.T) {
 	t.Run("shutdown with error in channel", func(t *testing.T) {
 		t.Parallel()
 
-		p, _ := provider.NewWASMProvider("test-node", false)
+		p, _ := provider.NewWASMProvider("test-node")
 
 		httpServer, err := httpserver.NewServer(&httpserver.Config{
 			ListenAddr: ":0",
@@ -300,7 +297,7 @@ func TestShutdownGracefully(t *testing.T) {
 	t.Run("shutdown with timeout", func(t *testing.T) {
 		t.Parallel()
 
-		p, _ := provider.NewWASMProvider("test-node", false)
+		p, _ := provider.NewWASMProvider("test-node")
 
 		httpServer, err := httpserver.NewServer(&httpserver.Config{
 			ListenAddr: ":0",
@@ -336,7 +333,6 @@ func TestRun(t *testing.T) {
 		cfg := &config.Config{
 			NodeName:       "test-node",
 			ListenAddr:     ":0",
-			DisableTaint:   true,
 			KubeconfigPath: kubeconfigPath,
 			Verbosity:      0,
 		}
@@ -347,10 +343,9 @@ func TestRun(t *testing.T) {
 
 		// Run should start but be cancelled quickly
 		err := app.Run(ctx, cfg)
-		// Error is expected due to context cancellation or node controller failure
-		if err != nil && !strings.Contains(err.Error(), "context") &&
-			!strings.Contains(err.Error(), "node controller") {
-			t.Logf("Run() returned error: %v", err)
+		// Error is expected due to context cancellation
+		if err != nil && !strings.Contains(err.Error(), "context") {
+			t.Logf("run() returned error: %v", err)
 		}
 	})
 
@@ -363,7 +358,6 @@ func TestRun(t *testing.T) {
 		cfg := &config.Config{
 			NodeName:       "test-node",
 			ListenAddr:     "invalid-address",
-			DisableTaint:   true,
 			KubeconfigPath: kubeconfigPath,
 			Verbosity:      0,
 		}
@@ -381,7 +375,6 @@ func TestRun(t *testing.T) {
 		cfg := &config.Config{
 			NodeName:       "test-node",
 			ListenAddr:     ":0",
-			DisableTaint:   true,
 			KubeconfigPath: "/nonexistent/kubeconfig",
 			Verbosity:      0,
 		}
@@ -421,7 +414,7 @@ func TestStartHTTPServer_ChannelFull(t *testing.T) {
 	t.Parallel()
 
 	// Test that when channel is full, error handling works correctly
-	p, _ := provider.NewWASMProvider("test-node", false)
+	p, _ := provider.NewWASMProvider("test-node")
 
 	httpServer, err := httpserver.NewServer(&httpserver.Config{
 		ListenAddr: ":0",
@@ -455,7 +448,7 @@ func TestStartHTTPServer_ChannelFull(t *testing.T) {
 func TestShutdownGracefully_HTTPErrChanTimeout(t *testing.T) {
 	t.Parallel()
 
-	p, _ := provider.NewWASMProvider("test-node", false)
+	p, _ := provider.NewWASMProvider("test-node")
 
 	httpServer, err := httpserver.NewServer(&httpserver.Config{
 		ListenAddr: ":0",

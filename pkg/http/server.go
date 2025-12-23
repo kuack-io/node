@@ -283,7 +283,7 @@ func (s *Server) handleAgent(ctx context.Context, conn *websocket.Conn) {
 	}
 
 	// Register agent with provider
-	s.registerAgent(agent)
+	s.registerAgent(ctx, agent)
 
 	// Send acknowledgment
 	ack := Message{
@@ -428,8 +428,8 @@ func (s *Server) monitorHeartbeat(ctx context.Context, agentUUID string) {
 }
 
 // registerAgent adds an agent to the provider.
-func (s *Server) registerAgent(agent *provider.AgentConnection) {
-	s.config.Provider.AddAgent(agent)
+func (s *Server) registerAgent(ctx context.Context, agent *provider.AgentConnection) {
+	s.config.Provider.AddAgent(ctx, agent)
 	klog.Infof("Agent %s registered with provider", agent.UUID)
 }
 

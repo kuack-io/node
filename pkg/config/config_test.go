@@ -276,14 +276,12 @@ func TestLoadConfig(t *testing.T) {
 	// Test with default values
 	mustUnsetenv("NODE_NAME")
 	mustUnsetenv("HTTP_LISTEN_ADDR")
-	mustUnsetenv("DISABLE_TAINT")
 	mustUnsetenv("KUBECONFIG")
 	mustUnsetenv("KLOG_VERBOSITY")
 
 	defer func() {
 		mustUnsetenv("NODE_NAME")
 		mustUnsetenv("HTTP_LISTEN_ADDR")
-		mustUnsetenv("DISABLE_TAINT")
 		mustUnsetenv("KUBECONFIG")
 		mustUnsetenv("KLOG_VERBOSITY")
 	}()
@@ -297,10 +295,6 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("LoadConfig() ListenAddr = %v, want %v", cfg.ListenAddr, config.DefaultListenAddr)
 	}
 
-	if cfg.DisableTaint != false {
-		t.Errorf("LoadConfig() DisableTaint = %v, want false", cfg.DisableTaint)
-	}
-
 	if cfg.Verbosity != config.DefaultKlogVerbosity {
 		t.Errorf("LoadConfig() Verbosity = %v, want %v", cfg.Verbosity, config.DefaultKlogVerbosity)
 	}
@@ -308,7 +302,6 @@ func TestLoadConfig(t *testing.T) {
 	// Test with custom values
 	mustSetenv("NODE_NAME", "custom-node")
 	mustSetenv("HTTP_LISTEN_ADDR", ":8080")
-	mustSetenv("DISABLE_TAINT", "true")
 	mustSetenv("KLOG_VERBOSITY", "5")
 	mustSetenv("KUBECONFIG", "/path/to/kubeconfig")
 
@@ -319,10 +312,6 @@ func TestLoadConfig(t *testing.T) {
 
 	if cfg.ListenAddr != ":8080" {
 		t.Errorf("LoadConfig() ListenAddr = %v, want :8080", cfg.ListenAddr)
-	}
-
-	if cfg.DisableTaint != true {
-		t.Errorf("LoadConfig() DisableTaint = %v, want true", cfg.DisableTaint)
 	}
 
 	if cfg.Verbosity != 5 {
@@ -528,14 +517,12 @@ func TestLoadConfig_AllFields(t *testing.T) {
 	// Test that all fields are properly loaded
 	mustSetenv("NODE_NAME", "test-node")
 	mustSetenv("HTTP_LISTEN_ADDR", ":8080")
-	mustSetenv("DISABLE_TAINT", "false")
 	mustSetenv("KUBECONFIG", "kubeconfig.yaml")
 	mustSetenv("KLOG_VERBOSITY", "3")
 
 	defer func() {
 		mustUnsetenv("NODE_NAME")
 		mustUnsetenv("HTTP_LISTEN_ADDR")
-		mustUnsetenv("DISABLE_TAINT")
 		mustUnsetenv("KUBECONFIG")
 		mustUnsetenv("KLOG_VERBOSITY")
 	}()
@@ -548,10 +535,6 @@ func TestLoadConfig_AllFields(t *testing.T) {
 
 	if cfg.ListenAddr != ":8080" {
 		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, ":8080")
-	}
-
-	if cfg.DisableTaint != false {
-		t.Errorf("DisableTaint = %v, want %v", cfg.DisableTaint, false)
 	}
 
 	if cfg.KubeconfigPath != "kubeconfig.yaml" {

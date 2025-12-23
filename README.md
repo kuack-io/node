@@ -23,7 +23,6 @@ The application reads configuration from environment variables:
 
 - `NODE_NAME` - Name of the virtual node (default: `wasm-node`)
 - `HTTP_LISTEN_ADDR` - HTTP server listen address (default: `:8080`)
-- `DISABLE_TAINT` - Disable the default taint on the node (default: `false`)
 - `KUBECONFIG` - Path to kubeconfig file (optional, uses in-cluster config if not set)
 - `KLOG_VERBOSITY` - klog verbosity level (default: `2`)
 

@@ -34,7 +34,6 @@ var (
 type Config struct {
 	NodeName       string
 	ListenAddr     string
-	DisableTaint   bool
 	KubeconfigPath string
 	Verbosity      int
 }
@@ -81,7 +80,6 @@ func LoadConfig() *Config {
 	return &Config{
 		NodeName:       GetEnv("NODE_NAME", DefaultNodeName),
 		ListenAddr:     listenAddr,
-		DisableTaint:   GetEnvBool("DISABLE_TAINT", false),
 		KubeconfigPath: GetEnv("KUBECONFIG", ""),
 		Verbosity:      GetEnvInt("KLOG_VERBOSITY", DefaultKlogVerbosity),
 	}

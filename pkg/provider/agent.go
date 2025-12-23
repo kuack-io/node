@@ -1,13 +1,17 @@
 package provider
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 )
 
 // AddAgent registers a new browser agent.
-func (p *WASMProvider) AddAgent(agent *AgentConnection) {
+func (p *WASMProvider) AddAgent(ctx context.Context, agent *AgentConnection) {
 	p.agents.Store(agent.UUID, agent)
 	p.resources.AddAgent(agent.UUID, agent.Resources)
+	klog.Infof("Agent %s registered with capacity: CPU=%s, Memory=%s", agent.UUID, agent.Resources.CPU.String(), agent.Resources.Memory.String())
 }
 
 // RemoveAgent unregisters a browser agent and fails its pods.

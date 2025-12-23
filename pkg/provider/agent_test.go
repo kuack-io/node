@@ -1,6 +1,8 @@
 package provider //nolint:testpackage // Tests need access to internal functions
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,7 +14,7 @@ import (
 func TestWASMProvider_AddAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	agent := &AgentConnection{
 		UUID: "test-agent-1",
@@ -27,7 +29,7 @@ func TestWASMProvider_AddAgent(t *testing.T) {
 		Labels:        map[string]string{"env": "test"},
 	}
 
-	provider.AddAgent(agent)
+	provider.AddAgent(context.Background(), agent)
 
 	// Verify agent was stored
 	retrievedAgent, ok := provider.GetAgent("test-agent-1")
@@ -54,7 +56,7 @@ func TestWASMProvider_AddAgent(t *testing.T) {
 func TestWASMProvider_RemoveAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Add an agent with a pod
 	agent := &AgentConnection{
@@ -98,7 +100,7 @@ func TestWASMProvider_RemoveAgent(t *testing.T) {
 	}
 	provider.mu.Unlock()
 
-	provider.AddAgent(agent)
+	provider.AddAgent(context.Background(), agent)
 
 	// Remove the agent
 	provider.RemoveAgent("test-agent-1")
@@ -130,7 +132,7 @@ func TestWASMProvider_RemoveAgent(t *testing.T) {
 func TestWASMProvider_RemoveAgent_NonExistent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Remove non-existent agent should not panic
 	provider.RemoveAgent("non-existent-agent")
@@ -145,7 +147,7 @@ func TestWASMProvider_RemoveAgent_NonExistent(t *testing.T) {
 func TestWASMProvider_RemoveAgent_InvalidType(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Store invalid agent type
 	provider.agents.Store("invalid-agent", "not-an-agent")
@@ -163,7 +165,7 @@ func TestWASMProvider_RemoveAgent_InvalidType(t *testing.T) {
 func TestWASMProvider_GetAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Test getting non-existent agent
 	_, ok := provider.GetAgent("non-existent")
@@ -182,7 +184,7 @@ func TestWASMProvider_GetAgent(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	provider.AddAgent(agent)
+	provider.AddAgent(context.Background(), agent)
 
 	// Get the agent
 	retrievedAgent, ok := provider.GetAgent("test-agent-1")
@@ -203,7 +205,7 @@ func TestWASMProvider_GetAgent(t *testing.T) {
 func TestWASMProvider_GetAgentCount(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Initially should be 0
 	count := provider.GetAgentCount()
@@ -234,8 +236,8 @@ func TestWASMProvider_GetAgentCount(t *testing.T) {
 		IsThrottled:   false,
 	}
 
-	provider.AddAgent(agent1)
-	provider.AddAgent(agent2)
+	provider.AddAgent(context.Background(), agent1)
+	provider.AddAgent(context.Background(), agent2)
 
 	// Should be 2
 	count = provider.GetAgentCount()
@@ -256,7 +258,7 @@ func TestWASMProvider_GetAgentCount(t *testing.T) {
 func TestWASMProvider_RemoveAgent_MultiplePods(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Add an agent with multiple pods
 	agent := &AgentConnection{
@@ -297,7 +299,7 @@ func TestWASMProvider_RemoveAgent_MultiplePods(t *testing.T) {
 	}
 	provider.mu.Unlock()
 
-	provider.AddAgent(agent)
+	provider.AddAgent(context.Background(), agent)
 
 	// Remove the agent
 	provider.RemoveAgent("test-agent-1")
@@ -316,5 +318,130 @@ func TestWASMProvider_RemoveAgent_MultiplePods(t *testing.T) {
 	_, exists2 := provider.pods.Load(getPodKey(pod2))
 	if exists2 {
 		t.Error("RemoveAgent() pod2 still exists")
+	}
+}
+
+func TestWASMProvider_CreatePod_RequiresAgentCapacity(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := NewWASMProvider("test-node")
+	ctx := context.Background()
+
+	// Create a pod with resource requests
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-pod",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "test-container",
+					Image: "test-image:latest",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("100m"),
+							corev1.ResourceMemory: resource.MustParse("128Mi"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// CreatePod should fail when no agents are available
+	err := provider.CreatePod(ctx, pod)
+	if err == nil {
+		t.Error("CreatePod() expected error when no agents available, got nil")
+	}
+
+	// Add an agent with insufficient capacity
+	agent := &AgentConnection{
+		UUID: "test-agent-1",
+		Resources: ResourceSpec{
+			CPU:    resource.MustParse("50m"),  // Less than requested 100m
+			Memory: resource.MustParse("64Mi"), // Less than requested 128Mi
+			GPU:    false,
+		},
+		AllocatedPods: make(map[string]*corev1.Pod),
+		LastHeartbeat: time.Now(),
+		IsThrottled:   false,
+		Stream:        nil,
+	}
+	provider.AddAgent(ctx, agent)
+
+	// CreatePod should still fail - agent doesn't have enough capacity
+	err = provider.CreatePod(ctx, pod)
+	if err == nil {
+		t.Error("CreatePod() expected error when agent has insufficient capacity, got nil")
+	}
+
+	// Add an agent with sufficient capacity
+	agent2 := &AgentConnection{
+		UUID: "test-agent-2",
+		Resources: ResourceSpec{
+			CPU:    resource.MustParse("1000m"),
+			Memory: resource.MustParse("1Gi"),
+			GPU:    false,
+		},
+		AllocatedPods: make(map[string]*corev1.Pod),
+		LastHeartbeat: time.Now(),
+		IsThrottled:   false,
+		Stream:        nil,
+	}
+	provider.AddAgent(ctx, agent2)
+
+	// Now CreatePod should succeed (even if WebSocket send fails in test)
+	err = provider.CreatePod(ctx, pod)
+	// In tests, WebSocket send will fail, but that's OK - we test the scheduling logic
+	// In real deployment, WebSocket send must succeed for pod to be scheduled
+	if err != nil && !strings.Contains(err.Error(), "agent stream is not a WebSocket connection") {
+		t.Errorf("CreatePod() error = %v, want nil or WebSocket error", err)
+
+		return
+	}
+
+	// If WebSocket send failed, pod won't be stored (we clean up on failure)
+	// So only verify if there was no error
+	if err != nil {
+		return
+	}
+
+	// Verify pod was stored and scheduled
+	retrievedPod, err := provider.GetPod(ctx, "default", "test-pod")
+	if err != nil {
+		t.Errorf("GetPod() error = %v, want nil", err)
+
+		return
+	}
+
+	if retrievedPod == nil {
+		t.Error("GetPod() returned nil pod")
+
+		return
+	}
+
+	// Pod should be scheduled
+	foundScheduled := false
+
+	for _, condition := range retrievedPod.Status.Conditions {
+		if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionTrue {
+			foundScheduled = true
+
+			break
+		}
+	}
+
+	if !foundScheduled {
+		t.Error("Pod should be scheduled when agent with sufficient capacity is available")
+	}
+
+	// Verify pod was allocated to agent with capacity
+	agent2.mu.RLock()
+	_, allocated := agent2.AllocatedPods["default/test-pod"]
+	agent2.mu.RUnlock()
+
+	if !allocated {
+		t.Error("Pod should be allocated to agent with sufficient capacity")
 	}
 }

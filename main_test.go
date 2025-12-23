@@ -325,7 +325,6 @@ func TestRun(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     ":0",
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -352,7 +351,6 @@ func TestRun_HttpServerError(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     "invalid-address",
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -396,7 +394,6 @@ func TestRun_HttpErrChan(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     "256.256.256.256:99999", // Invalid IP
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -423,7 +420,6 @@ func TestRun_ShutdownError(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     ":0",
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -449,7 +445,6 @@ func TestRun_HttpErrChanWithError(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     "999.999.999.999:99999",
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -511,7 +506,6 @@ func TestMainFunction(t *testing.T) {
 	if os.Getenv("TEST_MAIN") == "1" {
 		mustSetenv("NODE_NAME", "test-node")
 		mustSetenv("HTTP_LISTEN_ADDR", ":0")
-		mustSetenv("DISABLE_TAINT", "true")
 		mustSetenv("KLOG_VERBOSITY", "0")
 		main()
 
@@ -542,14 +536,12 @@ func TestLoadConfig(t *testing.T) {
 	// Test with default values
 	mustUnsetenv("NODE_NAME")
 	mustUnsetenv("HTTP_LISTEN_ADDR")
-	mustUnsetenv("DISABLE_TAINT")
 	mustUnsetenv("KUBECONFIG")
 	mustUnsetenv("KLOG_VERBOSITY")
 
 	defer func() {
 		mustUnsetenv("NODE_NAME")
 		mustUnsetenv("HTTP_LISTEN_ADDR")
-		mustUnsetenv("DISABLE_TAINT")
 		mustUnsetenv("KUBECONFIG")
 		mustUnsetenv("KLOG_VERBOSITY")
 	}()
@@ -563,10 +555,6 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("LoadConfig() ListenAddr = %v, want %v", cfg.ListenAddr, config.DefaultListenAddr)
 	}
 
-	if cfg.DisableTaint != false {
-		t.Errorf("LoadConfig() DisableTaint = %v, want false", cfg.DisableTaint)
-	}
-
 	if cfg.Verbosity != config.DefaultKlogVerbosity {
 		t.Errorf("LoadConfig() Verbosity = %v, want %v", cfg.Verbosity, config.DefaultKlogVerbosity)
 	}
@@ -574,7 +562,6 @@ func TestLoadConfig(t *testing.T) {
 	// Test with custom values
 	mustSetenv("NODE_NAME", "custom-node")
 	mustSetenv("HTTP_LISTEN_ADDR", ":8080")
-	mustSetenv("DISABLE_TAINT", "true")
 	mustSetenv("KLOG_VERBOSITY", "5")
 
 	cfg = config.LoadConfig()
@@ -584,10 +571,6 @@ func TestLoadConfig(t *testing.T) {
 
 	if cfg.ListenAddr != ":8080" {
 		t.Errorf("loadConfig() ListenAddr = %v, want :8080", cfg.ListenAddr)
-	}
-
-	if cfg.DisableTaint != true {
-		t.Errorf("loadConfig() DisableTaint = %v, want true", cfg.DisableTaint)
 	}
 
 	if cfg.Verbosity != 5 {
@@ -604,7 +587,6 @@ func TestSetupComponents(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     ":0",
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -642,7 +624,6 @@ func TestSetupComponents_ProviderError(t *testing.T) {
 	cfg := &config.Config{
 		NodeName:       "test-node",
 		ListenAddr:     ":0",
-		DisableTaint:   true,
 		KubeconfigPath: kubeconfigPath,
 		Verbosity:      0,
 	}
@@ -659,7 +640,7 @@ func TestSetupComponents_ProviderError(t *testing.T) {
 func TestShutdownGracefully(t *testing.T) {
 	t.Parallel()
 	// Create a test provider and server
-	p, _ := provider.NewWASMProvider("test-node", false)
+	p, _ := provider.NewWASMProvider("test-node")
 
 	httpServer, err := httpserver.NewServer(&httpserver.Config{
 		ListenAddr: ":0",

@@ -148,7 +148,7 @@ func TestServer_RegisterAgent(t *testing.T) {
 		IsThrottled:   false,
 	}
 
-	server.registerAgent(agent)
+	server.registerAgent(context.Background(), agent)
 
 	// Verify agent was registered
 	retrievedAgent, ok := p.GetAgent("test-agent")
@@ -186,7 +186,7 @@ func TestServer_HandleAgentDisconnect(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	p.AddAgent(agent)
+	p.AddAgent(context.Background(), agent)
 
 	// Disconnect
 	server.handleAgentDisconnect("test-agent")
@@ -218,7 +218,7 @@ func TestServer_HandleHeartbeat(t *testing.T) {
 		LastHeartbeat: time.Now().Add(-10 * time.Minute), // Old heartbeat
 		IsThrottled:   false,
 	}
-	p.AddAgent(agent)
+	p.AddAgent(context.Background(), agent)
 
 	// Send heartbeat
 	server.handleHeartbeat("test-agent", true)
@@ -278,7 +278,7 @@ func TestServer_HandleMessage(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	p.AddAgent(agent)
+	p.AddAgent(context.Background(), agent)
 
 	tests := []struct {
 		name    string
@@ -471,7 +471,7 @@ func TestServer_HandleDuplicateBrowserConnection(t *testing.T) {
 			LastHeartbeat: time.Now(),
 			IsThrottled:   false,
 		}
-		p.AddAgent(agent1)
+		p.AddAgent(r.Context(), agent1)
 
 		// Register browser ID mapping
 		server.browserIDMutex.Lock()
@@ -535,7 +535,7 @@ func TestServer_HandleDuplicateBrowserConnection(t *testing.T) {
 		server.handleDuplicateBrowserConnection("browser-123", "agent-2")
 
 		// Add the new agent
-		p.AddAgent(agent2)
+		p.AddAgent(r.Context(), agent2)
 
 		// Update browser ID mapping
 		server.browserIDMutex.Lock()
@@ -1071,7 +1071,7 @@ func TestServer_MonitorHeartbeat(t *testing.T) {
 			LastHeartbeat: time.Now().Add(-100 * time.Second), // Old heartbeat (should timeout)
 			IsThrottled:   false,
 		}
-		p.AddAgent(agent)
+		p.AddAgent(context.Background(), agent)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1120,7 +1120,7 @@ func TestServer_MonitorHeartbeat(t *testing.T) {
 			LastHeartbeat: time.Now(),
 			IsThrottled:   false,
 		}
-		p.AddAgent(agent)
+		p.AddAgent(context.Background(), agent)
 
 		ctx, cancel := context.WithCancel(context.Background())
 
@@ -1196,7 +1196,7 @@ func TestServer_MonitorHeartbeat(t *testing.T) {
 			LastHeartbeat: time.Now(),
 			IsThrottled:   false,
 		}
-		p.AddAgent(agent)
+		p.AddAgent(context.Background(), agent)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1298,7 +1298,7 @@ func TestServer_HandleMessage_InvalidHeartbeat(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	p.AddAgent(agent)
+	p.AddAgent(context.Background(), agent)
 
 	// Send heartbeat with invalid data
 	msg := &Message{
@@ -1379,7 +1379,7 @@ func TestServer_HandleDuplicateBrowserConnection_EdgeCases(t *testing.T) {
 			LastHeartbeat: time.Now(),
 			IsThrottled:   false,
 		}
-		p.AddAgent(agent)
+		p.AddAgent(context.Background(), agent)
 
 		server.browserIDMutex.Lock()
 		server.browserIDToUUID["browser-invalid"] = "agent-invalid"
@@ -1414,7 +1414,7 @@ func TestServer_HandleAgentDisconnect_WithBrowserID(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	p.AddAgent(agent)
+	p.AddAgent(context.Background(), agent)
 
 	// Register browser ID mapping
 	server.browserIDMutex.Lock()
@@ -1442,7 +1442,7 @@ func TestServer_HandleAgentDisconnect_WithBrowserID(t *testing.T) {
 
 // Helper function to create a test provider.
 func createTestProvider() *provider.WASMProvider {
-	p, _ := provider.NewWASMProvider("test-node", false)
+	p, _ := provider.NewWASMProvider("test-node")
 
 	return p
 }

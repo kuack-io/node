@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +17,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
+var (
+	// ErrNodeControllerPanic is returned when the node controller panics.
+	ErrNodeControllerPanic = errors.New("node controller panicked")
+)
+
 // Components holds the main application components.
 type Components struct {
 	WASMProvider *provider.WASMProvider
@@ -27,7 +33,7 @@ type Components struct {
 // SetupComponents initializes and returns the main application components.
 func SetupComponents(cfg *config.Config) (*Components, error) {
 	// Create the WASM provider
-	wasmProvider, err := provider.NewWASMProvider(cfg.NodeName, cfg.DisableTaint)
+	wasmProvider, err := provider.NewWASMProvider(cfg.NodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WASM provider: %w", err)
 	}
@@ -116,10 +122,31 @@ func RunNodeController(
 
 	klog.Info("Virtual Kubelet is ready and running")
 
-	// Run the node controller
-	err = nodeRunner.Run(ctx)
-	if err != nil {
-		return fmt.Errorf("node controller failed: %w", err)
+	// Run the node controller with panic recovery
+	// The virtual-kubelet library may panic if the node doesn't exist in the cluster
+	var (
+		runErr     error
+		panicValue any
+	)
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Store panic value to include in error message
+				panicValue = r
+				runErr = ErrNodeControllerPanic
+			}
+		}()
+
+		runErr = nodeRunner.Run(ctx)
+	}()
+
+	if panicValue != nil {
+		return fmt.Errorf("%w: %v", runErr, panicValue)
+	}
+
+	if runErr != nil {
+		return fmt.Errorf("node controller failed: %w", runErr)
 	}
 
 	return nil

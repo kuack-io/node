@@ -2,11 +2,13 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +22,10 @@ const (
 	KubeletPort = 10250
 	// logVerboseLevel is the klog verbosity level for verbose debug logs.
 	logVerboseLevel = 4
+	// TaintKeyKuackProvider is the taint key for kuack.io/provider.
+	TaintKeyKuackProvider = "kuack.io/provider"
+	// TaintValueKuack is the taint value for kuack provider.
+	TaintValueKuack = "kuack"
 )
 
 var (
@@ -27,18 +33,26 @@ var (
 	ErrNoSuitableAgent = errors.New("no suitable agent found")
 	// ErrInvalidAgentType is returned when an agent has an invalid type.
 	ErrInvalidAgentType = errors.New("invalid agent type")
+	// ErrPodHasNoContainers is returned when a pod has no containers.
+	ErrPodHasNoContainers = errors.New("pod has no containers")
+	// ErrAgentStreamNotWebSocket is returned when agent stream is not a WebSocket connection.
+	ErrAgentStreamNotWebSocket = errors.New("agent stream is not a WebSocket connection")
+)
+
+const (
+	// UnschedulableReason is the reason for unschedulable pods.
+	UnschedulableReason = "Unschedulable"
 )
 
 // WASMProvider implements the virtual-kubelet provider interface for browser-based WASM agents.
 type WASMProvider struct {
-	nodeName     string
-	agents       sync.Map // UUID -> *AgentConnection
-	pods         sync.Map // namespace/name -> *corev1.Pod
-	resources    *ResourceTracker
-	notifyFunc   func(*corev1.Pod)
-	startTime    time.Time
-	disableTaint bool
-	mu           sync.RWMutex
+	nodeName   string
+	agents     sync.Map // UUID -> *AgentConnection
+	pods       sync.Map // namespace/name -> *corev1.Pod
+	resources  *ResourceTracker
+	notifyFunc func(*corev1.Pod)
+	startTime  time.Time
+	mu         sync.RWMutex
 }
 
 // AgentConnection represents a connected browser agent.
@@ -70,39 +84,56 @@ type ResourceTracker struct {
 }
 
 // NewWASMProvider creates a new WASM provider instance.
-func NewWASMProvider(nodeName string, disableTaint bool) (*WASMProvider, error) {
+func NewWASMProvider(nodeName string) (*WASMProvider, error) {
 	klog.Infof("Initializing WASM provider for node: %s", nodeName)
 
 	return &WASMProvider{
-		nodeName:     nodeName,
-		resources:    NewResourceTracker(),
-		startTime:    time.Now(),
-		disableTaint: disableTaint,
+		nodeName:  nodeName,
+		resources: NewResourceTracker(),
+		startTime: time.Now(),
 	}, nil
 }
 
 // CreatePod accepts a new pod and schedules it to an available agent.
+// Returns an error if no agent with sufficient capacity is available.
 func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	klog.Infof("CreatePod called for %s/%s", pod.Namespace, pod.Name)
 
 	// Deep copy to ensure thread safety
 	pod = pod.DeepCopy()
 
-	// Select an appropriate agent
+	// Select an appropriate agent with sufficient capacity
 	agentUUID, err := p.selectAgent(pod)
 	if err != nil {
+		// No agent with sufficient capacity available - reject the pod
+		klog.Warningf("No suitable agent found for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+
 		return errdefs.AsInvalidInput(err)
 	}
 
 	// Load the agent
 	agentVal, ok := p.agents.Load(agentUUID)
 	if !ok {
+		// Agent disappeared between selection and loading
+		klog.Warningf("Agent %s not found after selection for pod %s/%s", agentUUID, pod.Namespace, pod.Name)
+
 		return errdefs.NotFound("agent not found")
 	}
 
 	agent, ok := agentVal.(*AgentConnection)
 	if !ok {
 		return errdefs.AsInvalidInput(ErrInvalidAgentType)
+	}
+
+	// Double-check capacity before allocating (race condition protection)
+	agent.mu.RLock()
+	hasCapacity := agent.HasCapacity(pod)
+	agent.mu.RUnlock()
+
+	if !hasCapacity {
+		klog.Warningf("Agent %s no longer has sufficient capacity for pod %s/%s", agentUUID, pod.Namespace, pod.Name)
+
+		return errdefs.AsInvalidInput(ErrNoSuitableAgent)
 	}
 
 	// Assign pod to agent
@@ -116,12 +147,20 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	// Send pod specification to agent via WebSocket
 	err = p.sendPodToAgent(agent, pod)
 	if err != nil {
+		// Remove from agent allocation on send failure
+		agent.mu.Lock()
+		delete(agent.AllocatedPods, getPodKey(pod))
+		agent.mu.Unlock()
+
+		// Remove from stored pods
+		p.pods.Delete(getPodKey(pod))
+
 		klog.Errorf("Failed to send pod to agent: %v", err)
 
 		return err
 	}
 
-	// Update pod status to Pending
+	// Update pod status to Pending (scheduled)
 	pod.Status.Phase = corev1.PodPending
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
@@ -131,8 +170,16 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		},
 	}
 
+	// Update stored pod with status
+	p.pods.Store(getPodKey(pod), pod)
+
 	// Update resource allocation
 	p.resources.AllocatePod(pod)
+
+	// Notify Kubernetes about the scheduled status
+	if p.notifyFunc != nil {
+		p.notifyFunc(pod.DeepCopy())
+	}
 
 	klog.Infof("Pod %s/%s assigned to agent %s", pod.Namespace, pod.Name, agentUUID)
 
@@ -375,14 +422,11 @@ func getPodKey(pod *corev1.Pod) string {
 }
 
 func (p *WASMProvider) getTaints() []corev1.Taint {
-	if p.disableTaint {
-		return nil
-	}
-
+	// Always return exactly one taint: kuack.io/provider=kuack:NoSchedule
 	return []corev1.Taint{
 		{
-			Key:    "kuack.io/provider",
-			Value:  "kuack",
+			Key:    TaintKeyKuackProvider,
+			Value:  TaintValueKuack,
 			Effect: corev1.TaintEffectNoSchedule,
 		},
 	}
@@ -393,6 +437,9 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 		selectedAgent string
 		maxAvailable  resource.Quantity
 	)
+
+	// Initialize maxAvailable to zero (empty quantity)
+	maxAvailable = resource.MustParse("0")
 
 	// Simple first-fit strategy for MVP. TODO: Implement more sophisticated scheduling.
 
@@ -414,10 +461,26 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 
 		// Check if agent has enough resources
 		if agent.HasCapacity(pod) {
+			// Calculate available CPU for this agent
+			agent.mu.RLock()
+
+			var allocatedCPU resource.Quantity
+
+			for _, allocatedPod := range agent.AllocatedPods {
+				for _, container := range allocatedPod.Spec.Containers {
+					if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+						allocatedCPU.Add(cpu)
+					}
+				}
+			}
+
+			availableCPU := agent.Resources.CPU.DeepCopy()
+			availableCPU.Sub(allocatedCPU)
+			agent.mu.RUnlock()
+
 			// Select agent with most available CPU
-			available := agent.Resources.CPU
-			if available.Cmp(maxAvailable) > 0 {
-				maxAvailable = available
+			if availableCPU.Cmp(maxAvailable) > 0 {
+				maxAvailable = availableCPU
 				selectedAgent = uuid
 			}
 		}
@@ -433,13 +496,184 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 }
 
 func (a *AgentConnection) HasCapacity(pod *corev1.Pod) bool {
-	// TODO: Implement proper resource checking
-	return true
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	// Calculate total requested resources for the pod
+	var requestedCPU, requestedMemory resource.Quantity
+
+	for _, container := range pod.Spec.Containers {
+		if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+			requestedCPU.Add(cpu)
+		}
+
+		if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+			requestedMemory.Add(mem)
+		}
+	}
+
+	// Calculate currently allocated resources
+	var allocatedCPU, allocatedMemory resource.Quantity
+
+	for _, allocatedPod := range a.AllocatedPods {
+		for _, container := range allocatedPod.Spec.Containers {
+			if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+				allocatedCPU.Add(cpu)
+			}
+
+			if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+				allocatedMemory.Add(mem)
+			}
+		}
+	}
+
+	// Calculate available resources
+	availableCPU := a.Resources.CPU.DeepCopy()
+	availableCPU.Sub(allocatedCPU)
+
+	availableMemory := a.Resources.Memory.DeepCopy()
+	availableMemory.Sub(allocatedMemory)
+
+	// Check if available resources are sufficient
+	hasCPU := availableCPU.Cmp(requestedCPU) >= 0
+	hasMemory := availableMemory.Cmp(requestedMemory) >= 0
+
+	return hasCPU && hasMemory
+}
+
+// AgentPodSpec represents the pod spec format expected by the agent.
+type AgentPodSpec struct {
+	Metadata struct {
+		Name      string `json:"name"`
+		Namespace string `json:"namespace"`
+	} `json:"metadata"`
+	Spec struct {
+		Containers []AgentContainerSpec `json:"containers"`
+	} `json:"spec"`
+}
+
+// AgentContainerSpec represents a container spec in the agent format.
+type AgentContainerSpec struct {
+	Name    string   `json:"name"`
+	Image   string   `json:"image"`
+	Command []string `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Env     []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"env,omitempty"`
+	Wasm *struct {
+		Path    string `json:"path,omitempty"`
+		Variant string `json:"variant,omitempty"`
+		Image   string `json:"image,omitempty"`
+	} `json:"wasm,omitempty"`
+}
+
+// convertPodToAgentSpec converts a Kubernetes Pod to the agent's PodSpec format.
+func convertPodToAgentSpec(pod *corev1.Pod) (*AgentPodSpec, error) {
+	if len(pod.Spec.Containers) == 0 {
+		return nil, ErrPodHasNoContainers
+	}
+
+	agentSpec := &AgentPodSpec{}
+	agentSpec.Metadata.Name = pod.Name
+	agentSpec.Metadata.Namespace = pod.Namespace
+
+	agentSpec.Spec.Containers = make([]AgentContainerSpec, 0, len(pod.Spec.Containers))
+
+	for _, container := range pod.Spec.Containers {
+		agentContainer := AgentContainerSpec{
+			Name:    container.Name,
+			Image:   container.Image,
+			Command: container.Command,
+			Args:    container.Args,
+		}
+
+		// Convert environment variables
+		if len(container.Env) > 0 {
+			agentContainer.Env = make([]struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			}, 0, len(container.Env))
+
+			for _, env := range container.Env {
+				envEntry := struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				}{
+					Name:  env.Name,
+					Value: env.Value,
+				}
+				agentContainer.Env = append(agentContainer.Env, envEntry)
+			}
+		}
+
+		// Check for WASM-specific annotations
+		// Look for annotations that might indicate WASM configuration
+		if pod.Annotations != nil {
+			wasmPath := pod.Annotations["kuack.io/wasm-path"]
+			wasmVariant := pod.Annotations["kuack.io/wasm-variant"]
+			wasmImage := pod.Annotations["kuack.io/wasm-image"]
+
+			if wasmPath != "" || wasmVariant != "" || wasmImage != "" {
+				agentContainer.Wasm = &struct {
+					Path    string `json:"path,omitempty"`
+					Variant string `json:"variant,omitempty"`
+					Image   string `json:"image,omitempty"`
+				}{
+					Path:    wasmPath,
+					Variant: wasmVariant,
+					Image:   wasmImage,
+				}
+			}
+		}
+
+		agentSpec.Spec.Containers = append(agentSpec.Spec.Containers, agentContainer)
+	}
+
+	return agentSpec, nil
 }
 
 func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) error {
-	// TODO: Serialize pod and send via WebSocket
 	klog.V(logVerboseLevel).Infof("Sending pod %s to agent %s", getPodKey(pod), agent.UUID)
+
+	// Convert pod to agent format
+	agentSpec, err := convertPodToAgentSpec(pod)
+	if err != nil {
+		return err
+	}
+
+	// Serialize to JSON
+	data, err := json.Marshal(agentSpec)
+	if err != nil {
+		return err
+	}
+
+	// Get WebSocket connection
+	conn, ok := agent.Stream.(*websocket.Conn)
+	if !ok {
+		return ErrAgentStreamNotWebSocket
+	}
+
+	// Create message in the format expected by the agent
+	// Using time.Time will be marshaled as RFC3339 (ISO 8601), matching the agent's expectation
+	msg := struct {
+		Type      string          `json:"type"`
+		Timestamp time.Time       `json:"timestamp"`
+		Data      json.RawMessage `json:"data"`
+	}{
+		Type:      "pod_spec",
+		Timestamp: time.Now(),
+		Data:      json.RawMessage(data),
+	}
+
+	// Send message via WebSocket
+	err = conn.WriteJSON(msg)
+	if err != nil {
+		return err
+	}
+
+	klog.V(logVerboseLevel).Infof("Successfully sent pod spec to agent %s", agent.UUID)
 
 	return nil
 }

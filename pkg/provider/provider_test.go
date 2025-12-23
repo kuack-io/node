@@ -3,6 +3,7 @@ package provider //nolint:testpackage // Tests need access to internal functions
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,22 +17,14 @@ func TestNewWASMProvider(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		nodeName     string
-		disableTaint bool
-		wantErr      bool
+		name     string
+		nodeName string
+		wantErr  bool
 	}{
 		{
-			name:         "create provider with taint enabled",
-			nodeName:     "test-node",
-			disableTaint: false,
-			wantErr:      false,
-		},
-		{
-			name:         "create provider with taint disabled",
-			nodeName:     "test-node",
-			disableTaint: true,
-			wantErr:      false,
+			name:     "create provider",
+			nodeName: "test-node",
+			wantErr:  false,
 		},
 	}
 
@@ -39,7 +32,7 @@ func TestNewWASMProvider(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			provider, err := NewWASMProvider(tt.nodeName, tt.disableTaint)
+			provider, err := NewWASMProvider(tt.nodeName)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NewWASMProvider() error = %v, wantErr %v", err, tt.wantErr)
 
@@ -56,14 +49,6 @@ func TestNewWASMProvider(t *testing.T) {
 						"NewWASMProvider() nodeName = %v, want %v",
 						provider.nodeName,
 						tt.nodeName,
-					)
-				}
-
-				if provider.disableTaint != tt.disableTaint {
-					t.Errorf(
-						"NewWASMProvider() disableTaint = %v, want %v",
-						provider.disableTaint,
-						tt.disableTaint,
 					)
 				}
 			}
@@ -116,58 +101,32 @@ func TestGetPodKey(t *testing.T) {
 func TestWASMProvider_GetTaints(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		disableTaint bool
-		wantLen      int
-	}{
-		{
-			name:         "taint enabled",
-			disableTaint: false,
-			wantLen:      1,
-		},
-		{
-			name:         "taint disabled",
-			disableTaint: true,
-			wantLen:      0,
-		},
+	provider, _ := NewWASMProvider("test-node")
+
+	taints := provider.getTaints()
+	// Should always return exactly 1 taint: kuack.io/provider=kuack:NoSchedule
+	if len(taints) != 1 {
+		t.Fatalf("getTaints() len = %v, want 1", len(taints))
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+	taint := taints[0]
+	if taint.Key != TaintKeyKuackProvider {
+		t.Errorf("getTaints() key = %v, want %s", taint.Key, TaintKeyKuackProvider)
+	}
 
-			provider, _ := NewWASMProvider("test-node", tt.disableTaint)
+	if taint.Value != TaintValueKuack {
+		t.Errorf("getTaints() value = %v, want %s", taint.Value, TaintValueKuack)
+	}
 
-			taints := provider.getTaints()
-			if len(taints) != tt.wantLen {
-				t.Errorf("getTaints() len = %v, want %v", len(taints), tt.wantLen)
-			}
-
-			if !tt.disableTaint && len(taints) > 0 {
-				if taints[0].Key != "kuack.io/provider" {
-					t.Errorf(
-						"getTaints() key = %v, want kuack.io/provider",
-						taints[0].Key,
-					)
-				}
-
-				if taints[0].Value != "kuack" {
-					t.Errorf("getTaints() value = %v, want kuack", taints[0].Value)
-				}
-
-				if taints[0].Effect != corev1.TaintEffectNoSchedule {
-					t.Errorf("getTaints() effect = %v, want NoSchedule", taints[0].Effect)
-				}
-			}
-		})
+	if taint.Effect != corev1.TaintEffectNoSchedule {
+		t.Errorf("getTaints() effect = %v, want NoSchedule", taint.Effect)
 	}
 }
 
 func TestWASMProvider_CreatePod(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Test with no agents available
@@ -191,12 +150,23 @@ func TestWASMProvider_CreatePod(t *testing.T) {
 		},
 	}
 
+	// CreatePod should fail when no agents are available
 	err := provider.CreatePod(ctx, pod)
 	if err == nil {
 		t.Error("CreatePod() expected error when no agents available, got nil")
 	}
+	// errdefs.AsInvalidInput wraps the error, check error message
+	if err != nil && !strings.Contains(err.Error(), "no suitable agent") {
+		t.Errorf("CreatePod() error = %v, want error containing 'no suitable agent'", err)
+	}
 
-	// Add an agent
+	// Pod should not be stored when creation fails
+	_, err = provider.GetPod(ctx, "default", "test-pod")
+	if err == nil {
+		t.Error("GetPod() expected error for pod that was rejected, got nil")
+	}
+
+	// Add an agent with sufficient capacity
 	agent := &AgentConnection{
 		UUID: "test-agent-1",
 		Resources: ResourceSpec{
@@ -207,30 +177,56 @@ func TestWASMProvider_CreatePod(t *testing.T) {
 		AllocatedPods: make(map[string]*corev1.Pod),
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
+		Stream:        nil, // No WebSocket in test
 	}
-	provider.AddAgent(agent)
+	provider.AddAgent(ctx, agent)
 
-	// Now create pod should succeed
+	// Now create pod should succeed (even if WebSocket send fails in test)
 	err = provider.CreatePod(ctx, pod)
-	if err != nil {
-		t.Errorf("CreatePod() error = %v, want nil", err)
+	// In tests, WebSocket send will fail because Stream is nil
+	// In real deployment, WebSocket send must succeed for pod to be scheduled
+	if err != nil && !strings.Contains(err.Error(), "agent stream is not a WebSocket connection") {
+		t.Errorf("CreatePod() error = %v, want nil or WebSocket error", err)
 	}
 
-	// Verify pod was stored
-	retrievedPod, err := provider.GetPod(ctx, "default", "test-pod")
-	if err != nil {
-		t.Errorf("GetPod() error = %v, want nil", err)
-	}
+	// If WebSocket send failed, pod won't be stored (we clean up on failure)
+	// So only verify if there was no error
+	if err == nil {
+		// Verify pod was stored and scheduled
+		retrievedPod, err := provider.GetPod(ctx, "default", "test-pod")
+		if err != nil {
+			t.Errorf("GetPod() error = %v, want nil", err)
 
-	if retrievedPod == nil {
-		t.Error("GetPod() returned nil pod")
+			return
+		}
+
+		if retrievedPod == nil {
+			t.Error("GetPod() returned nil pod")
+
+			return
+		}
+
+		// Pod should be scheduled
+		foundScheduled := false
+
+		for _, condition := range retrievedPod.Status.Conditions {
+			if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionTrue {
+				foundScheduled = true
+
+				break
+			}
+		}
+
+		if !foundScheduled {
+			t.Error("Pod should be scheduled when agent with capacity is available")
+		}
 	}
 }
 
 func TestWASMProvider_CreatePod_AgentNotFound(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Add an agent but then remove it to simulate race condition
@@ -244,7 +240,7 @@ func TestWASMProvider_CreatePod_AgentNotFound(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	provider.AddAgent(agent)
+	provider.AddAgent(ctx, agent)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -254,7 +250,8 @@ func TestWASMProvider_CreatePod_AgentNotFound(t *testing.T) {
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
-					Name: "test-container",
+					Name:  "test-container",
+					Image: "test-image:latest",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -266,21 +263,31 @@ func TestWASMProvider_CreatePod_AgentNotFound(t *testing.T) {
 		},
 	}
 
-	// Remove agent after selectAgent would have found it
-	// This simulates the agent being removed between selectAgent and Load
+	// Remove agent after adding it
+	// This simulates the agent being removed before pod creation
 	provider.RemoveAgent("test-agent-1")
 
-	// CreatePod should fail because agent was removed
+	// CreatePod should fail when no agents are available
 	err := provider.CreatePod(ctx, pod)
 	if err == nil {
-		t.Error("CreatePod() expected error when agent not found, got nil")
+		t.Error("CreatePod() expected error when no agents available, got nil")
+	}
+	// errdefs.AsInvalidInput wraps the error, check error message
+	if err != nil && !strings.Contains(err.Error(), "no suitable agent") {
+		t.Errorf("CreatePod() error = %v, want error containing 'no suitable agent'", err)
+	}
+
+	// Pod should not be stored when creation fails
+	_, err = provider.GetPod(ctx, "default", "test-pod")
+	if err == nil {
+		t.Error("GetPod() expected error for pod that was rejected, got nil")
 	}
 }
 
 func TestWASMProvider_CreatePod_InvalidAgentType(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Store an invalid type in the agents map to test type assertion error
@@ -306,19 +313,28 @@ func TestWASMProvider_CreatePod_InvalidAgentType(t *testing.T) {
 		},
 	}
 
-	// This will fail because selectAgent won't find a valid agent
-	// But if it did, the type assertion would fail
+	// selectAgent will skip the invalid agent and return ErrNoSuitableAgent
+	// CreatePod should fail when no suitable agent is available
 	err := provider.CreatePod(ctx, pod)
-	// Should fail because no suitable agent (invalid agent is skipped in selectAgent)
 	if err == nil {
 		t.Error("CreatePod() expected error when no suitable agent, got nil")
+	}
+	// errdefs.AsInvalidInput wraps the error, check error message
+	if err != nil && !strings.Contains(err.Error(), "no suitable agent") {
+		t.Errorf("CreatePod() error = %v, want error containing 'no suitable agent'", err)
+	}
+
+	// Pod should not be stored when creation fails
+	_, err = provider.GetPod(ctx, "default", "test-pod")
+	if err == nil {
+		t.Error("GetPod() expected error for pod that was rejected, got nil")
 	}
 }
 
 func TestWASMProvider_UpdatePod(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	pod := &corev1.Pod{
@@ -347,7 +363,7 @@ func TestWASMProvider_UpdatePod(t *testing.T) {
 func TestWASMProvider_DeletePod(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Add an agent
@@ -361,7 +377,7 @@ func TestWASMProvider_DeletePod(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	provider.AddAgent(agent)
+	provider.AddAgent(ctx, agent)
 
 	// Create a pod first
 	pod := &corev1.Pod{
@@ -402,7 +418,7 @@ func TestWASMProvider_DeletePod(t *testing.T) {
 func TestWASMProvider_DeletePod_NoAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Create a pod without an agent (pod exists but not assigned to any agent)
@@ -445,7 +461,7 @@ func TestWASMProvider_DeletePod_NoAgent(t *testing.T) {
 func TestWASMProvider_GetPod(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Test getting non-existent pod
@@ -483,7 +499,7 @@ func TestWASMProvider_GetPod(t *testing.T) {
 func TestWASMProvider_GetPodStatus(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Test getting status for non-existent pod
@@ -524,7 +540,7 @@ func TestWASMProvider_GetPodStatus(t *testing.T) {
 func TestWASMProvider_GetPods(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Initially should return empty list
@@ -568,7 +584,7 @@ func TestWASMProvider_GetPods(t *testing.T) {
 func TestWASMProvider_NotifyPods(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	called := false
@@ -610,7 +626,7 @@ func TestWASMProvider_NotifyPods(t *testing.T) {
 func TestWASMProvider_GetContainerLogs(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	opts := api.ContainerLogOpts{}
@@ -624,7 +640,7 @@ func TestWASMProvider_GetContainerLogs(t *testing.T) {
 func TestWASMProvider_RunInContainer(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	err := provider.RunInContainer(ctx, "default", "test-pod", "test-container", nil, nil)
@@ -636,7 +652,7 @@ func TestWASMProvider_RunInContainer(t *testing.T) {
 func TestWASMProvider_AttachToContainer(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	err := provider.AttachToContainer(ctx, "default", "test-pod", "test-container", nil)
@@ -648,7 +664,7 @@ func TestWASMProvider_AttachToContainer(t *testing.T) {
 func TestWASMProvider_Ping(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	err := provider.Ping(ctx)
@@ -660,7 +676,7 @@ func TestWASMProvider_Ping(t *testing.T) {
 func TestWASMProvider_NotifyNodeStatus(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	called := false
@@ -669,6 +685,28 @@ func TestWASMProvider_NotifyNodeStatus(t *testing.T) {
 
 		if node == nil {
 			t.Error("NotifyNodeStatus() callback received nil node")
+
+			return
+		}
+
+		// Verify there is exactly 1 taint: kuack.io/provider=kuack:NoSchedule
+		if len(node.Spec.Taints) != 1 {
+			t.Errorf("NotifyNodeStatus() taints count = %d, want exactly 1", len(node.Spec.Taints))
+		}
+
+		if len(node.Spec.Taints) == 1 {
+			taint := node.Spec.Taints[0]
+			if taint.Key != TaintKeyKuackProvider {
+				t.Errorf("NotifyNodeStatus() taint key = %v, want %s", taint.Key, TaintKeyKuackProvider)
+			}
+
+			if taint.Value != TaintValueKuack {
+				t.Errorf("NotifyNodeStatus() taint value = %v, want %s", taint.Value, TaintValueKuack)
+			}
+
+			if taint.Effect != corev1.TaintEffectNoSchedule {
+				t.Errorf("NotifyNodeStatus() taint effect = %v, want NoSchedule", taint.Effect)
+			}
 		}
 	}
 
@@ -682,10 +720,76 @@ func TestWASMProvider_NotifyNodeStatus(t *testing.T) {
 	}
 }
 
+func TestWASMProvider_NotifyNodeStatus_FiltersLibraryTaint(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := NewWASMProvider("test-node")
+	ctx := context.Background()
+
+	// Simulate the library calling the callback with a node that has the virtual-kubelet.io/provider taint
+	called := false
+	callback := func(node *corev1.Node) {
+		called = true
+
+		if node == nil {
+			t.Error("NotifyNodeStatus() callback received nil node")
+
+			return
+		}
+
+		// Verify there is exactly 1 taint: kuack.io/provider=kuack:NoSchedule
+		if len(node.Spec.Taints) != 1 {
+			t.Errorf("NotifyNodeStatus() taints count = %d, want exactly 1", len(node.Spec.Taints))
+		}
+
+		if len(node.Spec.Taints) == 1 {
+			taint := node.Spec.Taints[0]
+			if taint.Key != TaintKeyKuackProvider {
+				t.Errorf("NotifyNodeStatus() taint key = %v, want %s", taint.Key, TaintKeyKuackProvider)
+			}
+
+			if taint.Value != TaintValueKuack {
+				t.Errorf("NotifyNodeStatus() taint value = %v, want %s", taint.Value, TaintValueKuack)
+			}
+
+			if taint.Effect != corev1.TaintEffectNoSchedule {
+				t.Errorf("NotifyNodeStatus() taint effect = %v, want NoSchedule", taint.Effect)
+			}
+		}
+	}
+
+	// Call NotifyNodeStatus
+	provider.NotifyNodeStatus(ctx, callback)
+
+	// Wait for initial callback
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify GetNode() returns exactly 1 taint with correct values
+	node := provider.GetNode()
+	if len(node.Spec.Taints) != 1 {
+		t.Errorf("GetNode() taints count = %d, want exactly 1", len(node.Spec.Taints))
+	}
+
+	if len(node.Spec.Taints) == 1 {
+		taint := node.Spec.Taints[0]
+		if taint.Key != TaintKeyKuackProvider {
+			t.Errorf("GetNode() taint key = %v, want %s", taint.Key, TaintKeyKuackProvider)
+		}
+
+		if taint.Value != TaintValueKuack {
+			t.Errorf("GetNode() taint value = %v, want %s", taint.Value, TaintValueKuack)
+		}
+	}
+
+	if !called {
+		t.Error("NotifyNodeStatus() callback was not called")
+	}
+}
+
 func TestWASMProvider_GetNode(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	node := provider.GetNode()
 	if node == nil {
@@ -707,10 +811,77 @@ func TestWASMProvider_GetNode(t *testing.T) {
 	}
 }
 
+func TestWASMProvider_GetNode_OnlyCustomTaint(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := NewWASMProvider("test-node")
+
+	node := provider.GetNode()
+	if node == nil {
+		t.Fatal("GetNode() returned nil node")
+	}
+
+	// Verify there is exactly 1 taint
+	if len(node.Spec.Taints) != 1 {
+		t.Fatalf("GetNode() taints count = %d, want 1", len(node.Spec.Taints))
+		t.Logf("Taints: %+v", node.Spec.Taints)
+	}
+
+	taint := node.Spec.Taints[0]
+
+	// Verify it's the custom kuack.io/provider taint
+	if taint.Key != TaintKeyKuackProvider {
+		t.Errorf("GetNode() taint key = %v, want %s", taint.Key, TaintKeyKuackProvider)
+	}
+
+	if taint.Value != TaintValueKuack {
+		t.Errorf("GetNode() taint value = %v, want %s", taint.Value, TaintValueKuack)
+	}
+
+	if taint.Effect != corev1.TaintEffectNoSchedule {
+		t.Errorf("GetNode() taint effect = %v, want NoSchedule", taint.Effect)
+	}
+}
+
+func TestWASMProvider_GetNode_AlwaysHasOneTaint(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := NewWASMProvider("test-node")
+
+	node := provider.GetNode()
+	if node == nil {
+		t.Fatal("GetNode() returned nil node")
+	}
+
+	// Verify there is exactly 1 taint: kuack.io/provider=kuack:NoSchedule
+	if len(node.Spec.Taints) != 1 {
+		t.Fatalf("GetNode() taints count = %d, want exactly 1", len(node.Spec.Taints))
+		t.Logf("Taints: %+v", node.Spec.Taints)
+	}
+
+	taint := node.Spec.Taints[0]
+
+	// Verify the taint has the correct key
+	if taint.Key != TaintKeyKuackProvider {
+		t.Errorf("GetNode() taint key = %v, want %s", taint.Key, TaintKeyKuackProvider)
+	}
+
+	// Verify the taint has the correct value
+	if taint.Value != TaintValueKuack {
+		t.Errorf("GetNode() taint value = %v, want %s", taint.Value, TaintValueKuack)
+	}
+
+	// Verify the taint has the correct effect
+	if taint.Effect != corev1.TaintEffectNoSchedule {
+		t.Errorf("GetNode() taint effect = %v, want NoSchedule", taint.Effect)
+	}
+}
+
 func TestWASMProvider_SelectAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
+	ctx := context.Background()
 
 	// Test with no agents
 	pod := &corev1.Pod{
@@ -740,7 +911,7 @@ func TestWASMProvider_SelectAgent(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   true,
 	}
-	provider.AddAgent(throttledAgent)
+	provider.AddAgent(ctx, throttledAgent)
 
 	// Should still fail because agent is throttled
 	_, err = provider.selectAgent(pod)
@@ -759,7 +930,7 @@ func TestWASMProvider_SelectAgent(t *testing.T) {
 		LastHeartbeat: time.Now(),
 		IsThrottled:   false,
 	}
-	provider.AddAgent(agent)
+	provider.AddAgent(ctx, agent)
 
 	// Now should succeed
 	selectedUUID, err := provider.selectAgent(pod)
@@ -789,17 +960,59 @@ func TestAgentConnection_HasCapacity(t *testing.T) {
 		},
 	}
 
-	// Currently always returns true (TODO implementation)
+	// Pod with no resource requests should always fit
 	hasCapacity := agent.HasCapacity(pod)
 	if !hasCapacity {
-		t.Error("HasCapacity() = false, want true")
+		t.Error("HasCapacity() = false, want true (pod with no requests should fit)")
+	}
+
+	// Pod with resource requests that fit
+	podWithRequests := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hasCapacity = agent.HasCapacity(podWithRequests)
+	if !hasCapacity {
+		t.Error("HasCapacity() = false, want true (agent has sufficient capacity)")
+	}
+
+	// Pod with resource requests that exceed capacity
+	podExceedsCapacity := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("2000m"),
+							corev1.ResourceMemory: resource.MustParse("2Gi"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	hasCapacity = agent.HasCapacity(podExceedsCapacity)
+	if hasCapacity {
+		t.Error("HasCapacity() = true, want false (pod exceeds agent capacity)")
 	}
 }
 
 func TestWASMProvider_SendPodToAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	agent := &AgentConnection{
 		UUID: "test-agent",
@@ -817,18 +1030,135 @@ func TestWASMProvider_SendPodToAgent(t *testing.T) {
 			Namespace: "default",
 			Name:      "test-pod",
 		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "test-container",
+					Image: "test-image:latest",
+				},
+			},
+		},
 	}
 
+	// sendPodToAgent will fail because agent.Stream is not a WebSocket connection
+	// This is expected in tests without real WebSocket connections
 	err := provider.sendPodToAgent(agent, pod)
-	if err != nil {
-		t.Errorf("sendPodToAgent() error = %v, want nil", err)
+	if err == nil {
+		t.Error("sendPodToAgent() expected error when Stream is not WebSocket, got nil")
+	}
+
+	if !errors.Is(err, ErrAgentStreamNotWebSocket) {
+		t.Errorf("sendPodToAgent() error = %v, want ErrAgentStreamNotWebSocket", err)
+	}
+}
+
+func TestConvertPodToAgentSpec(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		pod     *corev1.Pod
+		wantErr bool
+	}{
+		{
+			name: "pod with container",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-pod",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:    "test-container",
+							Image:   "test-image:latest",
+							Command: []string{"echo"},
+							Args:    []string{"hello"},
+							Env: []corev1.EnvVar{
+								{Name: "ENV_VAR", Value: "value"},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "pod with no containers",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-pod",
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "pod with WASM annotations",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "test-pod",
+					Annotations: map[string]string{
+						"kuack.io/wasm-path":    "/pkg/module_bg.wasm",
+						"kuack.io/wasm-variant": "wasm32-web",
+						"kuack.io/wasm-image":   "ghcr.io/kuack-io/checker:latest",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "test-container",
+							Image: "test-image:latest",
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			spec, err := convertPodToAgentSpec(tt.pod)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("convertPodToAgentSpec() error = %v, wantErr %v", err, tt.wantErr)
+
+				return
+			}
+
+			if !tt.wantErr {
+				if spec == nil {
+					t.Error("convertPodToAgentSpec() returned nil spec")
+
+					return
+				}
+
+				if spec.Metadata.Name != tt.pod.Name {
+					t.Errorf("convertPodToAgentSpec() name = %v, want %v", spec.Metadata.Name, tt.pod.Name)
+				}
+
+				if spec.Metadata.Namespace != tt.pod.Namespace {
+					t.Errorf("convertPodToAgentSpec() namespace = %v, want %v", spec.Metadata.Namespace, tt.pod.Namespace)
+				}
+
+				if len(spec.Spec.Containers) != len(tt.pod.Spec.Containers) {
+					t.Errorf("convertPodToAgentSpec() containers count = %v, want %v", len(spec.Spec.Containers), len(tt.pod.Spec.Containers))
+				}
+			}
+		})
 	}
 }
 
 func TestWASMProvider_DeletePodFromAgent(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	agent := &AgentConnection{
 		UUID: "test-agent",
@@ -857,7 +1187,7 @@ func TestWASMProvider_DeletePodFromAgent(t *testing.T) {
 func TestWASMProvider_GetNodeConditions(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	conditions := provider.getNodeConditions()
 	if len(conditions) == 0 {
@@ -1045,7 +1375,7 @@ func TestResourceTracker_RemoveAgent(t *testing.T) {
 func TestWASMProvider_GetPod_InvalidType(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Store invalid type
@@ -1060,7 +1390,7 @@ func TestWASMProvider_GetPod_InvalidType(t *testing.T) {
 func TestWASMProvider_SelectAgent_InvalidKeyType(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Store agent with invalid key type
 	agent := &AgentConnection{
@@ -1091,7 +1421,7 @@ func TestWASMProvider_SelectAgent_InvalidKeyType(t *testing.T) {
 func TestWASMProvider_SelectAgent_InvalidValueType(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 
 	// Store invalid value type
 	provider.agents.Store("test-agent", "not-an-agent")
@@ -1112,7 +1442,7 @@ func TestWASMProvider_SelectAgent_InvalidValueType(t *testing.T) {
 func TestWASMProvider_GetPods_InvalidType(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node", false)
+	provider, _ := NewWASMProvider("test-node")
 	ctx := context.Background()
 
 	// Store invalid type

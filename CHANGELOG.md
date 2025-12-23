@@ -1,3 +1,9 @@
+## [1.0.8](https://github.com/kuack-io/node/compare/1.0.7...1.0.8) (2025-12-23)
+
+### Bug Fixes
+
+* tests ([3c9c3f8](https://github.com/kuack-io/node/commit/3c9c3f8ddb0a716c50e6cccc6b76d1bfc5eb3d64))
+
 ## [1.0.7](https://github.com/kuack-io/node/compare/1.0.6...1.0.7) (2025-12-22)
 
 ### Bug Fixes

@@ -152,8 +152,8 @@ func TestWASMProvider_GetTaints(t *testing.T) {
 					)
 				}
 
-				if taints[0].Value != "wasm" {
-					t.Errorf("getTaints() value = %v, want wasm", taints[0].Value)
+				if taints[0].Value != "kuack" {
+					t.Errorf("getTaints() value = %v, want kuack", taints[0].Value)
 				}
 
 				if taints[0].Effect != corev1.TaintEffectNoSchedule {

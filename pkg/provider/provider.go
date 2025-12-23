@@ -335,7 +335,7 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.nodeName,
 			Labels: map[string]string{
-				"type":                   "virtual-kubelet",
+				"kuack.io/node-type":     "kuack-node",
 				"kubernetes.io/role":     "agent",
 				"kubernetes.io/hostname": p.nodeName,
 				"alpha.service-controller.kubernetes.io/exclude-balancer": "true",
@@ -381,8 +381,8 @@ func (p *WASMProvider) getTaints() []corev1.Taint {
 
 	return []corev1.Taint{
 		{
-			Key:    "virtual-kubelet.io/provider",
-			Value:  "wasm",
+			Key:    "kuack.io/provider",
+			Value:  "kuack",
 			Effect: corev1.TaintEffectNoSchedule,
 		},
 	}

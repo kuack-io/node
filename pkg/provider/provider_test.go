@@ -145,9 +145,9 @@ func TestWASMProvider_GetTaints(t *testing.T) {
 			}
 
 			if !tt.disableTaint && len(taints) > 0 {
-				if taints[0].Key != "virtual-kubelet.io/provider" {
+				if taints[0].Key != "kuack.io/provider" {
 					t.Errorf(
-						"getTaints() key = %v, want virtual-kubelet.io/provider",
+						"getTaints() key = %v, want kuack.io/provider",
 						taints[0].Key,
 					)
 				}

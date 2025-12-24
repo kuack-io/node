@@ -1,3 +1,13 @@
+## [1.1.0](https://github.com/kuack-io/node/compare/1.0.8...1.1.0) (2025-12-24)
+
+### Features
+
+* implement pod allocation ([7e3b2ff](https://github.com/kuack-io/node/commit/7e3b2ff3fe23d27a8e6adca1229158d40df3c718))
+
+### Bug Fixes
+
+* registry proxy fixes ([0af22db](https://github.com/kuack-io/node/commit/0af22db2eab6a489f92e18e89ed078ecd7e47293))
+
 ## [1.0.8](https://github.com/kuack-io/node/compare/1.0.7...1.0.8) (2025-12-23)
 
 ### Bug Fixes

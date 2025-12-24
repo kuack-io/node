@@ -13,7 +13,14 @@ import (
 	"kuack-node/pkg/provider"
 
 	"github.com/virtual-kubelet/virtual-kubelet/node"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 )
 
@@ -21,6 +28,8 @@ var (
 	// ErrNodeControllerPanic is returned when the node controller panics.
 	ErrNodeControllerPanic = errors.New("node controller panicked")
 )
+
+const podControllerWorkers = 5
 
 // Components holds the main application components.
 type Components struct {
@@ -111,6 +120,66 @@ func RunNodeController(
 	wasmProvider *provider.WASMProvider,
 	kubeClient *kubernetes.Clientset,
 ) error {
+	// Create a pod controller to handle pod lifecycle events
+	// We need to watch pods assigned to this node
+	nodeName := wasmProvider.GetNode().Name
+
+	// Create informer factory with field selector to only watch pods for this node
+	podInformerFactory := informers.NewSharedInformerFactoryWithOptions(
+		kubeClient,
+		0, // resync period
+		informers.WithTweakListOptions(func(options *metav1.ListOptions) {
+			options.FieldSelector = fields.OneTermEqualSelector("spec.nodeName", nodeName).String()
+		}),
+	)
+
+	// Create a separate informer factory for other resources (ConfigMaps, Secrets, Services)
+	// These are not scoped to the node, so we need a standard informer factory
+	scmInformerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
+
+	// Get the informers
+	podInformer := podInformerFactory.Core().V1().Pods()
+	configMapInformer := scmInformerFactory.Core().V1().ConfigMaps()
+	secretInformer := scmInformerFactory.Core().V1().Secrets()
+	serviceInformer := scmInformerFactory.Core().V1().Services()
+
+	// Create event broadcaster
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartLogging(klog.Infof)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeClient.CoreV1().Events(corev1.NamespaceAll)})
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: "kuack-node"})
+
+	podControllerConfig := node.PodControllerConfig{
+		PodClient:         kubeClient.CoreV1(),
+		PodInformer:       podInformer,
+		ConfigMapInformer: configMapInformer,
+		SecretInformer:    secretInformer,
+		ServiceInformer:   serviceInformer,
+		Provider:          wasmProvider,
+		EventRecorder:     recorder,
+	}
+
+	podController, err := node.NewPodController(podControllerConfig)
+	if err != nil {
+		return fmt.Errorf("failed to create pod controller: %w", err)
+	}
+
+	// Start the informer factories
+	podInformerFactory.Start(ctx.Done())
+	scmInformerFactory.Start(ctx.Done())
+
+	// Wait for cache sync
+	podInformerFactory.WaitForCacheSync(ctx.Done())
+	scmInformerFactory.WaitForCacheSync(ctx.Done())
+
+	// Run the pod controller in a separate goroutine
+	go func() {
+		err := podController.Run(ctx, podControllerWorkers)
+		if err != nil {
+			klog.Errorf("Pod controller failed: %v", err)
+		}
+	}()
+
 	nodeRunner, err := node.NewNodeController(
 		wasmProvider,
 		wasmProvider.GetNode(),

@@ -12,6 +12,18 @@ func (p *WASMProvider) AddAgent(ctx context.Context, agent *AgentConnection) {
 	p.agents.Store(agent.UUID, agent)
 	p.resources.AddAgent(agent.UUID, agent.Resources)
 	klog.Infof("Agent %s registered with capacity: CPU=%s, Memory=%s", agent.UUID, agent.Resources.CPU.String(), agent.Resources.Memory.String())
+
+	// Notify that node status has changed (capacity updated)
+	p.mu.RLock()
+	notify := p.nodeStatusNotify
+	p.mu.RUnlock()
+
+	if notify != nil {
+		go func() {
+			node := p.GetNode()
+			notify(node)
+		}()
+	}
 }
 
 // RemoveAgent unregisters a browser agent and fails its pods.
@@ -48,6 +60,18 @@ func (p *WASMProvider) RemoveAgent(uuid string) {
 
 	// Update resource tracking
 	p.resources.RemoveAgent(uuid)
+
+	// Notify that node status has changed (capacity updated)
+	p.mu.RLock()
+	notify := p.nodeStatusNotify
+	p.mu.RUnlock()
+
+	if notify != nil {
+		go func() {
+			node := p.GetNode()
+			notify(node)
+		}()
+	}
 }
 
 // GetAgent retrieves an agent by UUID.

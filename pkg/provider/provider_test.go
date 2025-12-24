@@ -415,6 +415,166 @@ func TestWASMProvider_DeletePod(t *testing.T) {
 	}
 }
 
+func TestWASMProvider_UpdatePodStatus(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider, _ := NewWASMProvider("test-node")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "status-pod",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "checker",
+					Image: "example",
+				},
+			},
+		},
+	}
+
+	err := provider.UpdatePod(ctx, pod)
+	if err != nil {
+		t.Fatalf("UpdatePod() error = %v", err)
+	}
+
+	err = provider.UpdatePodStatus(
+		"default",
+		"status-pod",
+		AgentPodStatus{Phase: "Running", Message: "executing"},
+	)
+	if err != nil {
+		t.Fatalf("UpdatePodStatus() unexpected error = %v", err)
+	}
+
+	updated, err := provider.GetPod(ctx, "default", "status-pod")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v", err)
+	}
+
+	if updated.Status.Phase != corev1.PodRunning {
+		t.Errorf("Pod phase = %s, want %s", updated.Status.Phase, corev1.PodRunning)
+	}
+
+	if len(updated.Status.ContainerStatuses) != 1 {
+		t.Fatalf("ContainerStatuses len = %d, want 1", len(updated.Status.ContainerStatuses))
+	}
+
+	if updated.Status.ContainerStatuses[0].State.Running == nil {
+		t.Error("Expected container state to be running")
+	}
+}
+
+func TestWASMProvider_UpdatePodStatus_ReleasesAgentCapacity(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider, _ := NewWASMProvider("test-node")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "complete-pod",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name: "run",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("100m"),
+							corev1.ResourceMemory: resource.MustParse("64Mi"),
+						},
+					},
+				},
+			},
+		},
+	}
+
+	err := provider.UpdatePod(ctx, pod)
+	if err != nil {
+		t.Fatalf("UpdatePod() error = %v", err)
+	}
+
+	agent := &AgentConnection{
+		UUID: "agent-1",
+		Resources: ResourceSpec{
+			CPU:    resource.MustParse("1000m"),
+			Memory: resource.MustParse("1Gi"),
+		},
+		AllocatedPods: make(map[string]*corev1.Pod),
+		LastHeartbeat: time.Now(),
+	}
+	provider.AddAgent(ctx, agent)
+
+	podKey := "default/complete-pod"
+
+	agent.mu.Lock()
+	agent.AllocatedPods[podKey] = pod.DeepCopy()
+	agent.mu.Unlock()
+
+	err = provider.UpdatePodStatus(
+		"default",
+		"complete-pod",
+		AgentPodStatus{Phase: "Succeeded", Message: "done"},
+	)
+	if err != nil {
+		t.Fatalf("UpdatePodStatus() unexpected error = %v", err)
+	}
+
+	agent.mu.RLock()
+
+	if len(agent.AllocatedPods) != 0 {
+		t.Errorf("AllocatedPods still tracked pod, want 0")
+	}
+
+	agent.mu.RUnlock()
+}
+
+func TestWASMProvider_UpdatePodStatus_InvalidPhase(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	provider, _ := NewWASMProvider("test-node")
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "bad-phase",
+		},
+	}
+
+	err := provider.UpdatePod(ctx, pod)
+	if err != nil {
+		t.Fatalf("UpdatePod() error = %v", err)
+	}
+
+	err = provider.UpdatePodStatus(
+		"default",
+		"bad-phase",
+		AgentPodStatus{Phase: "mystery"},
+	)
+	if err == nil {
+		t.Fatal("expected error for invalid phase, got nil")
+	}
+
+	if !strings.Contains(err.Error(), "unknown agent pod phase") {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	updated, err := provider.GetPod(ctx, "default", "bad-phase")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v", err)
+	}
+
+	if updated.Status.Phase != "" {
+		t.Errorf("Pod phase should remain unset, got %s", updated.Status.Phase)
+	}
+}
+
 func TestWASMProvider_DeletePod_NoAgent(t *testing.T) {
 	t.Parallel()
 
@@ -1097,16 +1257,11 @@ func TestConvertPodToAgentSpec(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "pod with WASM annotations",
+			name: "pod gets hardcoded wasm32/wasi variant",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      "test-pod",
-					Annotations: map[string]string{
-						"kuack.io/wasm-path":    "/pkg/module_bg.wasm",
-						"kuack.io/wasm-variant": "wasm32-web",
-						"kuack.io/wasm-image":   "ghcr.io/kuack-io/checker:latest",
-					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -1132,26 +1287,43 @@ func TestConvertPodToAgentSpec(t *testing.T) {
 				return
 			}
 
-			if !tt.wantErr {
-				if spec == nil {
-					t.Error("convertPodToAgentSpec() returned nil spec")
-
-					return
-				}
-
-				if spec.Metadata.Name != tt.pod.Name {
-					t.Errorf("convertPodToAgentSpec() name = %v, want %v", spec.Metadata.Name, tt.pod.Name)
-				}
-
-				if spec.Metadata.Namespace != tt.pod.Namespace {
-					t.Errorf("convertPodToAgentSpec() namespace = %v, want %v", spec.Metadata.Namespace, tt.pod.Namespace)
-				}
-
-				if len(spec.Spec.Containers) != len(tt.pod.Spec.Containers) {
-					t.Errorf("convertPodToAgentSpec() containers count = %v, want %v", len(spec.Spec.Containers), len(tt.pod.Spec.Containers))
-				}
+			if tt.wantErr {
+				return
 			}
+
+			verifyConvertedPodSpec(t, spec, tt.pod)
 		})
+	}
+}
+
+func verifyConvertedPodSpec(t *testing.T, spec *AgentPodSpec, pod *corev1.Pod) {
+	t.Helper()
+
+	if spec == nil {
+		t.Error("convertPodToAgentSpec() returned nil spec")
+
+		return
+	}
+
+	if spec.Metadata.Name != pod.Name {
+		t.Errorf("convertPodToAgentSpec() name = %v, want %v", spec.Metadata.Name, pod.Name)
+	}
+
+	if spec.Metadata.Namespace != pod.Namespace {
+		t.Errorf("convertPodToAgentSpec() namespace = %v, want %v", spec.Metadata.Namespace, pod.Namespace)
+	}
+
+	if len(spec.Spec.Containers) != len(pod.Spec.Containers) {
+		t.Errorf("convertPodToAgentSpec() containers count = %v, want %v", len(spec.Spec.Containers), len(pod.Spec.Containers))
+	}
+
+	// Verify that all containers have the hardcoded wasm32/wasi variant
+	for i, container := range spec.Spec.Containers {
+		if container.Wasm == nil {
+			t.Errorf("convertPodToAgentSpec() container[%d].Wasm is nil, expected wasm spec", i)
+		} else if container.Wasm.Variant != "wasm32/wasi" {
+			t.Errorf("convertPodToAgentSpec() container[%d].Wasm.Variant = %v, want wasm32/wasi", i, container.Wasm.Variant)
+		}
 	}
 }
 

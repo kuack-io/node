@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +28,8 @@ const (
 	TaintKeyKuackProvider = "kuack.io/provider"
 	// TaintValueKuack is the taint value for kuack provider.
 	TaintValueKuack = "kuack"
+	// writeTimeout is the timeout for writing to WebSocket connections.
+	writeTimeout = 10 * time.Second
 )
 
 var (
@@ -37,6 +41,7 @@ var (
 	ErrPodHasNoContainers = errors.New("pod has no containers")
 	// ErrAgentStreamNotWebSocket is returned when agent stream is not a WebSocket connection.
 	ErrAgentStreamNotWebSocket = errors.New("agent stream is not a WebSocket connection")
+	errUnknownAgentPodPhase    = errors.New("unknown agent pod phase")
 )
 
 const (
@@ -46,13 +51,14 @@ const (
 
 // WASMProvider implements the virtual-kubelet provider interface for browser-based WASM agents.
 type WASMProvider struct {
-	nodeName   string
-	agents     sync.Map // UUID -> *AgentConnection
-	pods       sync.Map // namespace/name -> *corev1.Pod
-	resources  *ResourceTracker
-	notifyFunc func(*corev1.Pod)
-	startTime  time.Time
-	mu         sync.RWMutex
+	nodeName         string
+	agents           sync.Map // UUID -> *AgentConnection
+	pods             sync.Map // namespace/name -> *corev1.Pod
+	resources        *ResourceTracker
+	notifyFunc       func(*corev1.Pod)
+	nodeStatusNotify func(*corev1.Node)
+	startTime        time.Time
+	mu               sync.RWMutex
 }
 
 // AgentConnection represents a connected browser agent.
@@ -363,10 +369,12 @@ func (p *WASMProvider) Ping(ctx context.Context) error {
 //
 // NotifyNodeStatus should not block callers.
 func (p *WASMProvider) NotifyNodeStatus(ctx context.Context, callback func(*corev1.Node)) {
-	// Store the callback for future use when node status changes
-	// For now, we can call it immediately with the current node status
-	// In a more sophisticated implementation, we would call this whenever
-	// resources change, agents connect/disconnect, etc.
+	// Store the callback for use when node status changes
+	p.mu.Lock()
+	p.nodeStatusNotify = callback
+	p.mu.Unlock()
+
+	// Call it immediately with the current node status
 	go func() {
 		node := p.GetNode()
 		callback(node)
@@ -419,80 +427,6 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 
 func getPodKey(pod *corev1.Pod) string {
 	return pod.Namespace + "/" + pod.Name
-}
-
-func (p *WASMProvider) getTaints() []corev1.Taint {
-	// Always return exactly one taint: kuack.io/provider=kuack:NoSchedule
-	return []corev1.Taint{
-		{
-			Key:    TaintKeyKuackProvider,
-			Value:  TaintValueKuack,
-			Effect: corev1.TaintEffectNoSchedule,
-		},
-	}
-}
-
-func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
-	var (
-		selectedAgent string
-		maxAvailable  resource.Quantity
-	)
-
-	// Initialize maxAvailable to zero (empty quantity)
-	maxAvailable = resource.MustParse("0")
-
-	// Simple first-fit strategy for MVP. TODO: Implement more sophisticated scheduling.
-
-	p.agents.Range(func(key, value any) bool {
-		uuid, ok := key.(string)
-		if !ok {
-			return true
-		}
-
-		agent, ok := value.(*AgentConnection)
-		if !ok {
-			return true
-		}
-
-		// Skip throttled agents
-		if agent.IsThrottled {
-			return true
-		}
-
-		// Check if agent has enough resources
-		if agent.HasCapacity(pod) {
-			// Calculate available CPU for this agent
-			agent.mu.RLock()
-
-			var allocatedCPU resource.Quantity
-
-			for _, allocatedPod := range agent.AllocatedPods {
-				for _, container := range allocatedPod.Spec.Containers {
-					if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
-						allocatedCPU.Add(cpu)
-					}
-				}
-			}
-
-			availableCPU := agent.Resources.CPU.DeepCopy()
-			availableCPU.Sub(allocatedCPU)
-			agent.mu.RUnlock()
-
-			// Select agent with most available CPU
-			if availableCPU.Cmp(maxAvailable) > 0 {
-				maxAvailable = availableCPU
-				selectedAgent = uuid
-			}
-		}
-
-		return true
-	})
-
-	if selectedAgent == "" {
-		return "", ErrNoSuitableAgent
-	}
-
-	return selectedAgent, nil
 }
 
 func (a *AgentConnection) HasCapacity(pod *corev1.Pod) bool {
@@ -569,6 +503,12 @@ type AgentContainerSpec struct {
 	} `json:"wasm,omitempty"`
 }
 
+// AgentPodStatus represents the status payload reported by browser agents.
+type AgentPodStatus struct {
+	Phase   string `json:"phase"`
+	Message string `json:"message"`
+}
+
 // convertPodToAgentSpec converts a Kubernetes Pod to the agent's PodSpec format.
 func convertPodToAgentSpec(pod *corev1.Pod) (*AgentPodSpec, error) {
 	if len(pod.Spec.Containers) == 0 {
@@ -608,30 +548,331 @@ func convertPodToAgentSpec(pod *corev1.Pod) (*AgentPodSpec, error) {
 			}
 		}
 
-		// Check for WASM-specific annotations
-		// Look for annotations that might indicate WASM configuration
-		if pod.Annotations != nil {
-			wasmPath := pod.Annotations["kuack.io/wasm-path"]
-			wasmVariant := pod.Annotations["kuack.io/wasm-variant"]
-			wasmImage := pod.Annotations["kuack.io/wasm-image"]
-
-			if wasmPath != "" || wasmVariant != "" || wasmImage != "" {
-				agentContainer.Wasm = &struct {
-					Path    string `json:"path,omitempty"`
-					Variant string `json:"variant,omitempty"`
-					Image   string `json:"image,omitempty"`
-				}{
-					Path:    wasmPath,
-					Variant: wasmVariant,
-					Image:   wasmImage,
-				}
-			}
+		// Always set WASM variant to wasm32/wasi for all workloads
+		// This assumes all WASM images are packaged with wasm-pack in the standard format
+		agentContainer.Wasm = &struct {
+			Path    string `json:"path,omitempty"`
+			Variant string `json:"variant,omitempty"`
+			Image   string `json:"image,omitempty"`
+		}{
+			Variant: "wasm32/wasi",
 		}
 
 		agentSpec.Spec.Containers = append(agentSpec.Spec.Containers, agentContainer)
 	}
 
 	return agentSpec, nil
+}
+
+// UpdatePodStatus applies a status update coming from a browser agent.
+func (p *WASMProvider) UpdatePodStatus(namespace, name string, status AgentPodStatus) error {
+	podKey := namespace + "/" + name
+
+	podVal, ok := p.pods.Load(podKey)
+	if !ok {
+		return errdefs.NotFound("pod not found")
+	}
+
+	pod, ok := podVal.(*corev1.Pod)
+	if !ok {
+		return errdefs.NotFound("invalid pod type")
+	}
+
+	phase, err := agentPhaseFromString(status.Phase)
+	if err != nil {
+		return errdefs.AsInvalidInput(err)
+	}
+
+	updatedPod := pod.DeepCopy()
+	applyAgentStatusToPod(updatedPod, phase, status.Message)
+
+	// Store updated pod state for future queries/status calls
+	p.pods.Store(podKey, updatedPod)
+
+	// Free up agent capacity once the workload is finished
+	if phase == corev1.PodSucceeded || phase == corev1.PodFailed {
+		p.releasePodAllocation(podKey)
+	}
+
+	if p.notifyFunc != nil {
+		p.notifyFunc(updatedPod.DeepCopy())
+	}
+
+	return nil
+}
+
+func agentPhaseFromString(phase string) (corev1.PodPhase, error) {
+	switch strings.ToLower(strings.TrimSpace(phase)) {
+	case "pending":
+		return corev1.PodPending, nil
+	case "running":
+		return corev1.PodRunning, nil
+	case "succeeded", "success", "completed", "complete":
+		return corev1.PodSucceeded, nil
+	case "failed", "failure", "error":
+		return corev1.PodFailed, nil
+	default:
+		return "", fmt.Errorf("%w: %s", errUnknownAgentPodPhase, phase)
+	}
+}
+
+func applyAgentStatusToPod(pod *corev1.Pod, phase corev1.PodPhase, message string) {
+	now := metav1.Now()
+	pod.Status.Phase = phase
+	pod.Status.Reason = "Agent" + string(phase)
+	pod.Status.Message = message
+
+	if (phase == corev1.PodRunning || phase == corev1.PodSucceeded || phase == corev1.PodFailed) && pod.Status.StartTime == nil {
+		pod.Status.StartTime = &now
+	}
+
+	pod.Status.ContainerStatuses = buildContainerStatuses(pod, phase, message, now)
+	pod.Status.Conditions = updatePodConditions(pod.Status.Conditions, phase, now, message)
+}
+
+func buildContainerStatuses(
+	pod *corev1.Pod,
+	phase corev1.PodPhase,
+	message string,
+	timestamp metav1.Time,
+) []corev1.ContainerStatus {
+	statuses := make([]corev1.ContainerStatus, len(pod.Spec.Containers))
+
+	for i, container := range pod.Spec.Containers {
+		status := corev1.ContainerStatus{
+			Name:  container.Name,
+			Image: container.Image,
+		}
+
+		switch phase {
+		case corev1.PodPending:
+			status.State.Waiting = &corev1.ContainerStateWaiting{
+				Reason:  "WaitingForExecution",
+				Message: message,
+			}
+		case corev1.PodUnknown:
+			status.State.Waiting = &corev1.ContainerStateWaiting{
+				Reason:  "AgentUnknown",
+				Message: message,
+			}
+		case corev1.PodRunning:
+			status.Ready = true
+			status.Started = ptrTo(true)
+			status.State.Running = &corev1.ContainerStateRunning{
+				StartedAt: timestamp,
+			}
+		case corev1.PodSucceeded:
+			status.Ready = true
+			status.Started = ptrTo(true)
+			status.State.Terminated = &corev1.ContainerStateTerminated{
+				Reason:     "Completed",
+				Message:    message,
+				ExitCode:   0,
+				FinishedAt: timestamp,
+			}
+		case corev1.PodFailed:
+			status.State.Terminated = &corev1.ContainerStateTerminated{
+				Reason:     "Error",
+				Message:    message,
+				ExitCode:   1,
+				FinishedAt: timestamp,
+			}
+		}
+
+		statuses[i] = status
+	}
+
+	return statuses
+}
+
+func updatePodConditions(
+	existing []corev1.PodCondition,
+	phase corev1.PodPhase,
+	timestamp metav1.Time,
+	message string,
+) []corev1.PodCondition {
+	conditions := make([]corev1.PodCondition, len(existing))
+	copy(conditions, existing)
+
+	scheduled := corev1.PodCondition{
+		Type:               corev1.PodScheduled,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: timestamp,
+		Reason:             "AgentScheduled",
+		Message:            "Pod scheduled onto Kuack virtual node",
+	}
+	conditions = upsertCondition(conditions, scheduled)
+
+	switch phase {
+	case corev1.PodRunning:
+		ready := corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: timestamp,
+			Reason:             "AgentRunning",
+			Message:            message,
+		}
+		containersReady := corev1.PodCondition{
+			Type:               corev1.ContainersReady,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: timestamp,
+			Reason:             "AgentRunning",
+			Message:            message,
+		}
+		conditions = upsertCondition(conditions, ready)
+		conditions = upsertCondition(conditions, containersReady)
+	case corev1.PodPending:
+		waiting := corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionFalse,
+			LastTransitionTime: timestamp,
+			Reason:             "WaitingForAgent",
+			Message:            message,
+		}
+		conditions = upsertCondition(conditions, waiting)
+	case corev1.PodUnknown:
+		unknown := corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionFalse,
+			LastTransitionTime: timestamp,
+			Reason:             "AgentUnknown",
+			Message:            message,
+		}
+		conditions = upsertCondition(conditions, unknown)
+	case corev1.PodSucceeded:
+		complete := corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionFalse,
+			LastTransitionTime: timestamp,
+			Reason:             "Completed",
+			Message:            message,
+		}
+		conditions = upsertCondition(conditions, complete)
+	case corev1.PodFailed:
+		failed := corev1.PodCondition{
+			Type:               corev1.PodReady,
+			Status:             corev1.ConditionFalse,
+			LastTransitionTime: timestamp,
+			Reason:             "Failed",
+			Message:            message,
+		}
+		conditions = upsertCondition(conditions, failed)
+	}
+
+	return conditions
+}
+
+func upsertCondition(conditions []corev1.PodCondition, condition corev1.PodCondition) []corev1.PodCondition {
+	for i := range conditions {
+		if conditions[i].Type == condition.Type {
+			conditions[i] = condition
+
+			return conditions
+		}
+	}
+
+	return append(conditions, condition)
+}
+
+func (p *WASMProvider) releasePodAllocation(podKey string) {
+	p.agents.Range(func(_, value any) bool {
+		agent, ok := value.(*AgentConnection)
+		if !ok {
+			return true
+		}
+
+		agent.mu.Lock()
+
+		if _, exists := agent.AllocatedPods[podKey]; exists {
+			delete(agent.AllocatedPods, podKey)
+			agent.mu.Unlock()
+			klog.V(logVerboseLevel).Infof("Released pod %s from agent %s", podKey, agent.UUID)
+
+			return false
+		}
+
+		agent.mu.Unlock()
+
+		return true
+	})
+}
+
+func (p *WASMProvider) getTaints() []corev1.Taint {
+	// Always return exactly one taint: kuack.io/provider=kuack:NoSchedule
+	return []corev1.Taint{
+		{
+			Key:    TaintKeyKuackProvider,
+			Value:  TaintValueKuack,
+			Effect: corev1.TaintEffectNoSchedule,
+		},
+	}
+}
+
+func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
+	var (
+		selectedAgent string
+		maxAvailable  resource.Quantity
+	)
+
+	// Initialize maxAvailable to zero (empty quantity)
+	maxAvailable = resource.MustParse("0")
+
+	// Simple first-fit strategy for MVP. TODO: Implement more sophisticated scheduling.
+
+	p.agents.Range(func(key, value any) bool {
+		uuid, ok := key.(string)
+		if !ok {
+			return true
+		}
+
+		agent, ok := value.(*AgentConnection)
+		if !ok {
+			return true
+		}
+
+		// Skip throttled agents
+		if agent.IsThrottled {
+			return true
+		}
+
+		// Check if agent has enough resources
+		if agent.HasCapacity(pod) {
+			// Calculate available CPU for this agent
+			agent.mu.RLock()
+
+			var allocatedCPU resource.Quantity
+
+			for _, allocatedPod := range agent.AllocatedPods {
+				for _, container := range allocatedPod.Spec.Containers {
+					if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+						allocatedCPU.Add(cpu)
+					}
+				}
+			}
+
+			availableCPU := agent.Resources.CPU.DeepCopy()
+			availableCPU.Sub(allocatedCPU)
+			agent.mu.RUnlock()
+
+			// Select agent with most available CPU
+			if availableCPU.Cmp(maxAvailable) > 0 {
+				maxAvailable = availableCPU
+				selectedAgent = uuid
+			}
+		}
+
+		return true
+	})
+
+	if selectedAgent == "" {
+		return "", ErrNoSuitableAgent
+	}
+
+	return selectedAgent, nil
+}
+
+func ptrTo[T any](value T) *T {
+	return &value
 }
 
 func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) error {
@@ -653,6 +894,14 @@ func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) e
 	conn, ok := agent.Stream.(*websocket.Conn)
 	if !ok {
 		return ErrAgentStreamNotWebSocket
+	}
+
+	// Set write deadline
+	err = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if err != nil {
+		klog.Errorf("Failed to set write deadline: %v", err)
+
+		return err
 	}
 
 	// Create message in the format expected by the agent
@@ -748,11 +997,31 @@ func (rt *ResourceTracker) GetAllocatable() corev1.ResourceList {
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 
-	cpuAvail := rt.totalCapacity[corev1.ResourceCPU].DeepCopy()
-	cpuAvail.Sub(rt.totalAllocated[corev1.ResourceCPU])
+	cpuCapacity := rt.totalCapacity[corev1.ResourceCPU]
+	cpuAllocated := rt.totalAllocated[corev1.ResourceCPU]
+	cpuAvail := cpuCapacity.DeepCopy()
+	cpuAvail.Sub(cpuAllocated)
+	// Ensure non-negative
+	if cpuAvail.Sign() < 0 {
+		cpuAvail = resource.MustParse("0")
+	}
 
-	memAvail := rt.totalCapacity[corev1.ResourceMemory].DeepCopy()
-	memAvail.Sub(rt.totalAllocated[corev1.ResourceMemory])
+	memCapacity := rt.totalCapacity[corev1.ResourceMemory]
+	memAllocated := rt.totalAllocated[corev1.ResourceMemory]
+	memAvail := memCapacity.DeepCopy()
+	memAvail.Sub(memAllocated)
+	// Ensure non-negative
+	if memAvail.Sign() < 0 {
+		memAvail = resource.MustParse("0")
+	}
+
+	klog.Infof("[Resources] Allocatable: CPU=%s (capacity=%s, allocated=%s), Memory=%s (capacity=%s, allocated=%s)",
+		(&cpuAvail).String(),
+		(&cpuCapacity).String(),
+		(&cpuAllocated).String(),
+		(&memAvail).String(),
+		(&memCapacity).String(),
+		(&memAllocated).String())
 
 	return corev1.ResourceList{
 		corev1.ResourceCPU:    cpuAvail,
@@ -811,6 +1080,8 @@ func (rt *ResourceTracker) AddAgent(uuid string, resources ResourceSpec) {
 	mem := rt.totalCapacity[corev1.ResourceMemory]
 	mem.Add(resources.Memory)
 	rt.totalCapacity[corev1.ResourceMemory] = mem
+
+	klog.Infof("[Resources] AddAgent %s: CPU capacity now %s, Memory capacity now %s", uuid, cpu.String(), mem.String())
 }
 
 func (rt *ResourceTracker) RemoveAgent(uuid string) {

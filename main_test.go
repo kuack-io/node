@@ -355,7 +355,8 @@ func TestRun_HttpServerError(t *testing.T) {
 		Verbosity:      0,
 	}
 
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
 
 	err := app.Run(ctx, cfg)
 	// Should fail on invalid HTTP address or kubeconfig
@@ -398,7 +399,7 @@ func TestRun_HttpErrChan(t *testing.T) {
 		Verbosity:      0,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	err := app.Run(ctx, cfg)
@@ -450,7 +451,7 @@ func TestRun_HttpErrChanWithError(t *testing.T) {
 	}
 
 	// Use longer timeout to allow HTTP server to fail and error to be sent to channel
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	err := app.Run(ctx, cfg)

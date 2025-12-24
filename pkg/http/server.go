@@ -64,6 +64,7 @@ type Server struct {
 	server          *http.Server
 	browserIDToUUID map[string]string // Maps browser ID to agent UUID
 	browserIDMutex  sync.RWMutex      // Protects browserIDToUUID map
+	registryProxy   *RegistryProxy
 }
 
 // Message types for agent communication protocol.
@@ -75,6 +76,13 @@ const (
 	MsgTypePodDelete = "pod_delete"
 	MsgTypePodLogs   = "pod_logs"
 )
+
+// PodStatusData represents a status update pushed from an agent.
+type PodStatusData struct {
+	Namespace string                  `json:"namespace"`
+	Name      string                  `json:"name"`
+	Status    provider.AgentPodStatus `json:"status"`
+}
 
 // Message represents a protocol message.
 type Message struct {
@@ -104,6 +112,7 @@ func NewServer(config *Config) (*Server, error) {
 	return &Server{
 		config:          config,
 		browserIDToUUID: make(map[string]string),
+		registryProxy:   NewRegistryProxy(),
 	}, nil
 }
 
@@ -112,6 +121,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleRoot)
 	mux.HandleFunc("/ws", s.handleWebSocket)
+	mux.HandleFunc("/registry", s.handleRegistryProxy)
 
 	// Create listener first to get the actual address
 	lc := net.ListenConfig{}
@@ -211,6 +221,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	s.handleAgent(ctx, conn)
+}
+
+func (s *Server) handleRegistryProxy(w http.ResponseWriter, r *http.Request) {
+	s.registryProxy.ServeHTTP(w, r)
 }
 
 // handleAgent manages a single agent connection.
@@ -361,8 +375,39 @@ func (s *Server) handleMessage(agentUUID string, msg *Message) {
 		s.handleHeartbeat(agentUUID, heartbeatData.IsThrottled)
 
 	case MsgTypePodStatus:
-		// TODO: Handle pod status updates from agent
-		klog.V(logVerboseLevel).Infof("Received pod status from agent %s", agentUUID)
+		if s.config.Provider == nil {
+			klog.Warning("Received pod status but provider is nil")
+
+			return
+		}
+
+		var statusData PodStatusData
+
+		err := json.Unmarshal(msg.Data, &statusData)
+		if err != nil {
+			klog.Errorf("Failed to unmarshal pod status: %v", err)
+
+			return
+		}
+
+		if statusData.Namespace == "" || statusData.Name == "" {
+			klog.Warning("Pod status missing namespace or name")
+
+			return
+		}
+
+		err = s.config.Provider.UpdatePodStatus(statusData.Namespace, statusData.Name, statusData.Status)
+		if err != nil {
+			klog.Errorf(
+				"Failed to update pod status for %s/%s: %v",
+				statusData.Namespace,
+				statusData.Name,
+				err,
+			)
+		}
+
+		klog.V(logVerboseLevel).
+			Infof("Updated pod status for %s/%s from agent %s", statusData.Namespace, statusData.Name, agentUUID)
 
 	case MsgTypePodLogs:
 		// TODO: Handle log streaming from agent

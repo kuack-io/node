@@ -53,6 +53,61 @@ func TestWASMProvider_AddAgent(t *testing.T) {
 	}
 }
 
+func TestWASMProvider_AddAgent_TriggersNodeStatusNotification(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := NewWASMProvider("test-node")
+
+	// Set up node status notification callback
+	notifyCalled := false
+
+	var notifiedNode *corev1.Node
+
+	provider.mu.Lock()
+	provider.nodeStatusNotify = func(node *corev1.Node) {
+		notifyCalled = true
+		notifiedNode = node
+	}
+	provider.mu.Unlock()
+
+	agent := &AgentConnection{
+		UUID: "test-agent-1",
+		Resources: ResourceSpec{
+			CPU:    resource.MustParse("2000m"),
+			Memory: resource.MustParse("2Gi"),
+			GPU:    false,
+		},
+		AllocatedPods: make(map[string]*corev1.Pod),
+		LastHeartbeat: time.Now(),
+		IsThrottled:   false,
+	}
+
+	provider.AddAgent(context.Background(), agent)
+
+	// Give goroutine time to execute
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify notification was called
+	if !notifyCalled {
+		t.Error("AddAgent() did not trigger node status notification")
+	}
+
+	if notifiedNode == nil {
+		t.Fatal("AddAgent() notification received nil node")
+	}
+
+	// Verify node has updated capacity
+	cpuCapacity := notifiedNode.Status.Capacity[corev1.ResourceCPU]
+	if cpuCapacity.String() != "2" {
+		t.Errorf("AddAgent() node capacity CPU = %v, want 2", cpuCapacity.String())
+	}
+
+	memCapacity := notifiedNode.Status.Capacity[corev1.ResourceMemory]
+	if memCapacity.String() != "2Gi" {
+		t.Errorf("AddAgent() node capacity Memory = %v, want 2Gi", memCapacity.String())
+	}
+}
+
 func TestWASMProvider_RemoveAgent(t *testing.T) {
 	t.Parallel()
 
@@ -126,6 +181,67 @@ func TestWASMProvider_RemoveAgent(t *testing.T) {
 	// Verify notify was called
 	if !notifyCalled {
 		t.Error("RemoveAgent() notifyFunc was not called")
+	}
+}
+
+func TestWASMProvider_RemoveAgent_TriggersNodeStatusNotification(t *testing.T) {
+	t.Parallel()
+
+	provider, _ := NewWASMProvider("test-node")
+
+	// Set up node status notification callback
+	nodeNotifyCalled := false
+
+	var notifiedNode *corev1.Node
+
+	provider.mu.Lock()
+	provider.nodeStatusNotify = func(node *corev1.Node) {
+		nodeNotifyCalled = true
+		notifiedNode = node
+	}
+	provider.mu.Unlock()
+
+	agent := &AgentConnection{
+		UUID: "test-agent-1",
+		Resources: ResourceSpec{
+			CPU:    resource.MustParse("2000m"),
+			Memory: resource.MustParse("2Gi"),
+		},
+		AllocatedPods: make(map[string]*corev1.Pod),
+		LastHeartbeat: time.Now(),
+		IsThrottled:   false,
+	}
+
+	provider.AddAgent(context.Background(), agent)
+
+	// Reset notification flag
+	nodeNotifyCalled = false
+	notifiedNode = nil
+
+	// Remove the agent
+	provider.RemoveAgent("test-agent-1")
+
+	// Give goroutine time to execute
+	time.Sleep(50 * time.Millisecond)
+
+	// Verify notification was called
+	if !nodeNotifyCalled {
+		t.Error("RemoveAgent() did not trigger node status notification")
+	}
+
+	if notifiedNode == nil {
+		t.Fatal("RemoveAgent() notification received nil node")
+	}
+
+	// Verify node has updated capacity (should be back to 0)
+	cpuCapacity := notifiedNode.Status.Capacity[corev1.ResourceCPU]
+	if cpuCapacity.String() != "0" {
+		t.Errorf("RemoveAgent() node capacity CPU = %v, want 0", cpuCapacity.String())
+	}
+
+	memCapacity := notifiedNode.Status.Capacity[corev1.ResourceMemory]
+	if memCapacity.String() != "0" {
+		t.Errorf("RemoveAgent() node capacity Memory = %v, want 0", memCapacity.String())
 	}
 }
 

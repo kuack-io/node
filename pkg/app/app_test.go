@@ -362,11 +362,18 @@ func TestRun(t *testing.T) {
 			Verbosity:      0,
 		}
 
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
 
 		err := app.Run(ctx, cfg)
-		// Should fail on invalid HTTP address or kubeconfig
-		_ = err
+		if err == nil {
+			t.Fatal("Run() with invalid HTTP address expected error, got nil")
+		}
+
+		if !strings.Contains(err.Error(), "HTTP server error") &&
+			!strings.Contains(err.Error(), "context deadline exceeded") {
+			t.Fatalf("Run() with invalid HTTP address returned unexpected error: %v", err)
+		}
 	})
 
 	t.Run("run with invalid kubeconfig", func(t *testing.T) {

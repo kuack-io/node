@@ -12,9 +12,11 @@ import (
 
 	"kuack-node/pkg/provider"
 
+	"github.com/google/go-containerregistry/pkg/v1"
 	"github.com/gorilla/websocket"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestNewServer(t *testing.T) {
@@ -125,6 +127,49 @@ func TestServer_SendMessage(t *testing.T) {
 
 	if receivedMsg.Type != msg.Type {
 		t.Errorf("sendMessage() type = %v, want %v", receivedMsg.Type, msg.Type)
+	}
+}
+
+func TestServer_HandleRegistryProxy(t *testing.T) {
+	t.Parallel()
+
+	server, err := NewServer(&Config{
+		ListenAddr: ":8080",
+		Provider:   createTestProvider(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+
+	responseBody := "served"
+	server.registryProxy = NewRegistryProxy()
+	server.registryProxy.fetchArtifact = func(ctx context.Context, ref, artifactPath string, platform *v1.Platform) ([]byte, error) {
+		if ref != "example.com/app:tag" {
+			t.Fatalf("unexpected ref %q", ref)
+		}
+
+		if artifactPath != "pkg/app.js" {
+			t.Fatalf("unexpected artifact path %q", artifactPath)
+		}
+
+		if platform != nil {
+			t.Fatal("expected nil platform")
+		}
+
+		return []byte(responseBody), nil
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/registry?image=example.com/app:tag&path=pkg/app.js", nil)
+	recorder := httptest.NewRecorder()
+
+	server.handleRegistryProxy(recorder, req)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d want %d", recorder.Code, http.StatusOK)
+	}
+
+	if recorder.Body.String() != responseBody {
+		t.Fatalf("body=%q want %q", recorder.Body.String(), responseBody)
 	}
 }
 
@@ -348,6 +393,63 @@ func TestServer_HandleMessage(t *testing.T) {
 				_ = conn.Close()
 			}()
 		})
+	}
+}
+
+func TestServer_HandleMessage_PodStatusUpdatesProvider(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	p := createTestProvider()
+	server, _ := NewServer(&Config{
+		ListenAddr: ":8080",
+		Provider:   p,
+	})
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "status-from-agent",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "runner"}},
+		},
+	}
+
+	err := p.UpdatePod(ctx, pod)
+	if err != nil {
+		t.Fatalf("UpdatePod() error = %v", err)
+	}
+
+	payload := PodStatusData{
+		Namespace: "default",
+		Name:      "status-from-agent",
+		Status: provider.AgentPodStatus{
+			Phase:   "Running",
+			Message: "executing",
+		},
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal payload error = %v", err)
+	}
+
+	msg := &Message{
+		Type:      MsgTypePodStatus,
+		Timestamp: time.Now(),
+		Data:      data,
+	}
+
+	server.handleMessage("test-agent", msg)
+
+	updated, err := p.GetPod(ctx, "default", "status-from-agent")
+	if err != nil {
+		t.Fatalf("GetPod() error = %v", err)
+	}
+
+	if updated.Status.Phase != corev1.PodRunning {
+		t.Errorf("pod phase = %s, want %s", updated.Status.Phase, corev1.PodRunning)
 	}
 }
 

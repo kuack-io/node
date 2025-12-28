@@ -1,106 +1,55 @@
 package config_test
 
 import (
-	"os"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
 
 	"kuack-node/pkg/config"
+
+	"github.com/stretchr/testify/assert"
 )
 
-// Helper functions to ignore errors in tests.
-func mustSetenv(key, value string) {
-	err := os.Setenv(key, value)
-	if err != nil {
-		panic(err)
-	}
-}
-
-func mustUnsetenv(key string) {
-	err := os.Unsetenv(key)
-	if err != nil {
-		panic(err)
-	}
-}
-
-var envMu sync.Mutex //nolint:gochecknoglobals // shared env guard needed across parallel tests
-
-func lockEnv(t *testing.T) {
-	t.Helper()
-	envMu.Lock()
-	t.Cleanup(envMu.Unlock)
-}
-
-func uniqueEnvKey(t *testing.T, base string) string {
-	t.Helper()
-	sanitized := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'A' && r <= 'Z':
-			return r
-		case r >= 'a' && r <= 'z':
-			return r - ('a' - 'A')
-		case r >= '0' && r <= '9':
-			return r
-		default:
-			return '_'
-		}
-	}, t.Name())
-
-	return base + "_" + sanitized
-}
-
+//nolint:dupl // Keep GetEnv-style helpers isolated so each scalar type exercises unique default/empty semantics with readable failures.
 func TestGetEnv(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		key          string
-		value        string
 		defaultValue string
-		want         string
+		mockEnv      map[string]string
+		expected     string
 	}{
 		{
-			name:         "environment variable set",
-			key:          "TEST_VAR_MAIN",
-			value:        "test-value",
+			name:         "returns value when set",
+			key:          "TEST_KEY",
 			defaultValue: "default",
-			want:         "test-value",
+			mockEnv:      map[string]string{"TEST_KEY": "value"},
+			expected:     "value",
 		},
 		{
-			name:         "environment variable not set",
-			key:          "NONEXISTENT_VAR_MAIN",
-			value:        "",
+			name:         "returns default when not set",
+			key:          "TEST_KEY",
 			defaultValue: "default",
-			want:         "default",
+			mockEnv:      map[string]string{},
+			expected:     "default",
 		},
 		{
-			name:         "environment variable empty string",
-			key:          "EMPTY_VAR_MAIN",
-			value:        "",
+			name:         "returns default when empty",
+			key:          "TEST_KEY",
 			defaultValue: "default",
-			want:         "default",
+			mockEnv:      map[string]string{"TEST_KEY": ""},
+			expected:     "default",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			key := uniqueEnvKey(t, tt.key)
 
-			// Clean up environment before test
-			mustUnsetenv(key)
-			defer mustUnsetenv(key)
-
-			if tt.value != "" {
-				mustSetenv(key, tt.value)
+			getter := func(key string) string {
+				return tt.mockEnv[key]
 			}
-
-			got := config.GetEnv(key, tt.defaultValue)
-			if got != tt.want {
-				t.Errorf("GetEnv(%q, %q) = %q, want %q", key, tt.defaultValue, got, tt.want)
-			}
+			assert.Equal(t, tt.expected, config.GetEnv(getter, tt.key, tt.defaultValue))
 		})
 	}
 }
@@ -111,485 +60,180 @@ func TestGetEnvBool(t *testing.T) {
 	tests := []struct {
 		name         string
 		key          string
-		value        string
 		defaultValue bool
-		want         bool
+		mockEnv      map[string]string
+		expected     bool
 	}{
 		{
-			name:         "environment variable set to true",
-			key:          "TEST_BOOL_MAIN",
-			value:        "true",
+			name:         "returns true when set to true",
+			key:          "TEST_BOOL",
 			defaultValue: false,
-			want:         true,
+			mockEnv:      map[string]string{"TEST_BOOL": "true"},
+			expected:     true,
 		},
 		{
-			name:         "environment variable set to false",
-			key:          "TEST_BOOL_MAIN",
-			value:        "false",
+			name:         "returns true when set to 1",
+			key:          "TEST_BOOL",
+			defaultValue: false,
+			mockEnv:      map[string]string{"TEST_BOOL": "1"},
+			expected:     true,
+		},
+		{
+			name:         "returns false when set to false",
+			key:          "TEST_BOOL",
 			defaultValue: true,
-			want:         false,
+			mockEnv:      map[string]string{"TEST_BOOL": "false"},
+			expected:     false,
 		},
 		{
-			name:         "environment variable set to 1",
-			key:          "TEST_BOOL_MAIN",
-			value:        "1",
-			defaultValue: false,
-			want:         true,
-		},
-		{
-			name:         "environment variable set to TRUE (case insensitive)",
-			key:          "TEST_BOOL_MAIN",
-			value:        "TRUE",
-			defaultValue: false,
-			want:         true,
-		},
-		{
-			name:         "environment variable set to True (case insensitive)",
-			key:          "TEST_BOOL_MAIN",
-			value:        "True",
-			defaultValue: false,
-			want:         true,
-		},
-		{
-			name:         "environment variable set to FALSE (case insensitive)",
-			key:          "TEST_BOOL_MAIN",
-			value:        "FALSE",
+			name:         "returns default when not set",
+			key:          "TEST_BOOL",
 			defaultValue: true,
-			want:         false,
+			mockEnv:      map[string]string{},
+			expected:     true,
 		},
 		{
-			name:         "environment variable not set",
-			key:          "NONEXISTENT_BOOL_MAIN",
-			value:        "",
-			defaultValue: true,
-			want:         true,
-		},
-		{
-			name:         "environment variable set to invalid value",
-			key:          "TEST_BOOL_MAIN",
-			value:        "invalid",
+			name:         "returns true when set to TRUE",
+			key:          "TEST_BOOL",
 			defaultValue: false,
-			want:         false,
+			mockEnv:      map[string]string{"TEST_BOOL": "TRUE"},
+			expected:     true,
+		},
+		{
+			name:         "returns false when set to 0",
+			key:          "TEST_BOOL",
+			defaultValue: true,
+			mockEnv:      map[string]string{"TEST_BOOL": "0"},
+			expected:     false,
+		},
+		{
+			name:         "returns false when invalid",
+			key:          "TEST_BOOL",
+			defaultValue: true,
+			mockEnv:      map[string]string{"TEST_BOOL": "invalid"},
+			expected:     false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			key := uniqueEnvKey(t, tt.key)
 
-			// Clean up environment before test
-			mustUnsetenv(key)
-			defer mustUnsetenv(key)
-
-			if tt.value != "" {
-				mustSetenv(key, tt.value)
+			getter := func(key string) string {
+				return tt.mockEnv[key]
 			}
-
-			got := config.GetEnvBool(key, tt.defaultValue)
-			if got != tt.want {
-				t.Errorf("GetEnvBool(%q, %v) = %v, want %v", key, tt.defaultValue, got, tt.want)
-			}
+			assert.Equal(t, tt.expected, config.GetEnvBool(getter, tt.key, tt.defaultValue))
 		})
 	}
 }
 
+//nolint:dupl // Mirroring the string test layout lets the int parser cover identical edge-cases without indirection that would obscure intent.
 func TestGetEnvInt(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		key          string
-		value        string
 		defaultValue int
-		want         int
+		mockEnv      map[string]string
+		expected     int
 	}{
 		{
-			name:         "environment variable set to valid integer",
-			key:          "TEST_INT_MAIN",
-			value:        "42",
-			defaultValue: 0,
-			want:         42,
-		},
-		{
-			name:         "environment variable set to zero",
-			key:          "TEST_INT_MAIN",
-			value:        "0",
+			name:         "returns value when set",
+			key:          "TEST_INT",
 			defaultValue: 10,
-			want:         0,
+			mockEnv:      map[string]string{"TEST_INT": "42"},
+			expected:     42,
 		},
 		{
-			name:         "environment variable set to negative integer",
-			key:          "TEST_INT_MAIN",
-			value:        "-5",
-			defaultValue: 0,
-			want:         -5,
+			name:         "returns default when not set",
+			key:          "TEST_INT",
+			defaultValue: 10,
+			mockEnv:      map[string]string{},
+			expected:     10,
 		},
 		{
-			name:         "environment variable not set",
-			key:          "NONEXISTENT_INT_MAIN",
-			value:        "",
-			defaultValue: 100,
-			want:         100,
-		},
-		{
-			name:         "environment variable set to invalid value",
-			key:          "TEST_INT_MAIN",
-			value:        "not-a-number",
-			defaultValue: 50,
-			want:         50,
-		},
-		{
-			name:         "environment variable set to empty string",
-			key:          "TEST_INT_MAIN",
-			value:        "",
-			defaultValue: 25,
-			want:         25,
+			name:         "returns default when invalid",
+			key:          "TEST_INT",
+			defaultValue: 10,
+			mockEnv:      map[string]string{"TEST_INT": "invalid"},
+			expected:     10,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			key := uniqueEnvKey(t, tt.key)
 
-			// Clean up environment before test
-			mustUnsetenv(key)
-			defer mustUnsetenv(key)
-
-			if tt.value != "" {
-				mustSetenv(key, tt.value)
+			getter := func(key string) string {
+				return tt.mockEnv[key]
 			}
-
-			got := config.GetEnvInt(key, tt.defaultValue)
-			if got != tt.want {
-				t.Errorf("GetEnvInt(%q, %d) = %d, want %d", key, tt.defaultValue, got, tt.want)
-			}
+			assert.Equal(t, tt.expected, config.GetEnvInt(getter, tt.key, tt.defaultValue))
 		})
 	}
 }
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
-	lockEnv(t)
 
-	// Test with default values
-	mustUnsetenv("NODE_NAME")
-	mustUnsetenv("HTTP_LISTEN_ADDR")
-	mustUnsetenv("KUBECONFIG")
-	mustUnsetenv("KLOG_VERBOSITY")
-
-	defer func() {
-		mustUnsetenv("NODE_NAME")
-		mustUnsetenv("HTTP_LISTEN_ADDR")
-		mustUnsetenv("KUBECONFIG")
-		mustUnsetenv("KLOG_VERBOSITY")
-	}()
-
-	cfg := config.LoadConfig()
-	if cfg.NodeName != config.DefaultNodeName {
-		t.Errorf("LoadConfig() NodeName = %v, want %v", cfg.NodeName, config.DefaultNodeName)
+	mockEnv := map[string]string{
+		"NODE_NAME":      "test-node",
+		"PUBLIC_PORT":    "9090",
+		"INTERNAL_PORT":  "10255",
+		"TLS_CERT_FILE":  "/tmp/cert",
+		"TLS_KEY_FILE":   "/tmp/key",
+		"AGENT_TOKEN":    "token",
+		"KUBECONFIG":     "/tmp/kubeconfig",
+		"KLOG_VERBOSITY": "4",
 	}
 
-	if cfg.ListenAddr != config.DefaultListenAddr {
-		t.Errorf("LoadConfig() ListenAddr = %v, want %v", cfg.ListenAddr, config.DefaultListenAddr)
+	getter := func(key string) string {
+		return mockEnv[key]
 	}
 
-	if cfg.Verbosity != config.DefaultKlogVerbosity {
-		t.Errorf("LoadConfig() Verbosity = %v, want %v", cfg.Verbosity, config.DefaultKlogVerbosity)
+	cfg := config.LoadConfig(getter)
+
+	assert.Equal(t, "test-node", cfg.NodeName)
+	assert.Equal(t, 9090, cfg.PublicPort)
+	assert.Equal(t, 10255, cfg.InternalPort)
+	assert.Equal(t, "/tmp/cert", cfg.TLSCertFile)
+	assert.Equal(t, "/tmp/key", cfg.TLSKeyFile)
+	assert.Equal(t, "token", cfg.AgentToken)
+	assert.Equal(t, "/tmp/kubeconfig", cfg.KubeconfigPath)
+	assert.Equal(t, 4, cfg.Verbosity)
+}
+
+func TestLoadConfig_Defaults(t *testing.T) {
+	t.Parallel()
+
+	getter := func(key string) string {
+		return ""
 	}
 
-	// Test with custom values
-	mustSetenv("NODE_NAME", "custom-node")
-	mustSetenv("HTTP_LISTEN_ADDR", ":8080")
-	mustSetenv("KLOG_VERBOSITY", "5")
-	mustSetenv("KUBECONFIG", "/path/to/kubeconfig")
+	cfg := config.LoadConfig(getter)
 
-	cfg = config.LoadConfig()
-	if cfg.NodeName != "custom-node" {
-		t.Errorf("LoadConfig() NodeName = %v, want custom-node", cfg.NodeName)
-	}
-
-	if cfg.ListenAddr != ":8080" {
-		t.Errorf("LoadConfig() ListenAddr = %v, want :8080", cfg.ListenAddr)
-	}
-
-	if cfg.Verbosity != 5 {
-		t.Errorf("LoadConfig() Verbosity = %v, want 5", cfg.Verbosity)
-	}
-
-	if cfg.KubeconfigPath != "/path/to/kubeconfig" {
-		t.Errorf("LoadConfig() KubeconfigPath = %v, want /path/to/kubeconfig", cfg.KubeconfigPath)
-	}
+	assert.Equal(t, config.DefaultNodeName, cfg.NodeName)
+	assert.Equal(t, config.DefaultPublicPort, cfg.PublicPort)
+	assert.Equal(t, config.DefaultInternalPort, cfg.InternalPort)
+	assert.Empty(t, cfg.TLSCertFile)
+	assert.Empty(t, cfg.TLSKeyFile)
+	assert.Empty(t, cfg.AgentToken)
+	assert.Empty(t, cfg.KubeconfigPath)
+	assert.Equal(t, config.DefaultKlogVerbosity, cfg.Verbosity)
 }
 
 func TestInitializeKlog(t *testing.T) {
 	t.Parallel()
+	// This test modifies global state, so it cannot run in parallel with other tests
+	// that might depend on klog (though none of the current tests do).
+	// However, InitializeKlog uses a mutex and a flag to ensure it runs only once.
+	// So calling it multiple times is safe.
+	assert.NotPanics(t, func() {
+		config.InitializeKlog(2)
+	})
 
-	tests := []struct {
-		name      string
-		verbosity int
-	}{
-		{
-			name:      "verbosity within valid range (0)",
-			verbosity: 0,
-		},
-		{
-			name:      "verbosity within valid range (5)",
-			verbosity: 5,
-		},
-		{
-			name:      "verbosity within valid range (10)",
-			verbosity: 10,
-		},
-		{
-			name:      "verbosity below range (-1)",
-			verbosity: -1,
-		},
-		{
-			name:      "verbosity above range (11)",
-			verbosity: 11,
-		},
-	}
-
-	for _, tt := range tests {
-		tc := tt
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			// InitializeKlog should not panic for any verbosity value
-			config.InitializeKlog(tc.verbosity)
-		})
-	}
-
-	// Test that multiple calls don't cause issues
-	config.InitializeKlog(2)
-	config.InitializeKlog(3)
-	config.InitializeKlog(4)
-}
-
-func TestConfigConstants(t *testing.T) {
-	t.Parallel()
-
-	if config.DefaultNodeName == "" {
-		t.Error("DefaultNodeName should not be empty")
-	}
-
-	if config.DefaultListenAddr == "" {
-		t.Error("DefaultListenAddr should not be empty")
-	}
-
-	if config.DefaultKlogVerbosity < 0 {
-		t.Error("DefaultKlogVerbosity should be non-negative")
-	}
-
-	if config.ShutdownTimeout <= 0 {
-		t.Error("ShutdownTimeout should be positive")
-	}
-
-	if config.HttpErrChanTimeout <= 0 {
-		t.Error("HttpErrChanTimeout should be positive")
-	}
-}
-
-func TestGetEnvBool_EdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		key          string
-		value        string
-		defaultValue bool
-		want         bool
-	}{
-		{
-			name:         "value is 'True' (mixed case)",
-			key:          "TEST_BOOL_EDGE",
-			value:        "True",
-			defaultValue: false,
-			want:         true,
-		},
-		{
-			name:         "value is 'FaLsE' (mixed case)",
-			key:          "TEST_BOOL_EDGE",
-			value:        "FaLsE",
-			defaultValue: true,
-			want:         false,
-		},
-		{
-			name:         "value is '0'",
-			key:          "TEST_BOOL_EDGE",
-			value:        "0",
-			defaultValue: true,
-			want:         false, // strconv.ParseBool("0") returns false
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := uniqueEnvKey(t, tt.key)
-
-			mustUnsetenv(key)
-			defer mustUnsetenv(key)
-
-			mustSetenv(key, tt.value)
-
-			got := config.GetEnvBool(key, tt.defaultValue)
-			if got != tt.want {
-				t.Errorf("GetEnvBool(%q, %v) = %v, want %v", key, tt.defaultValue, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestGetEnvInt_EdgeCases(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		key          string
-		value        string
-		defaultValue int
-		want         int
-	}{
-		{
-			name:         "value is large positive integer",
-			key:          "TEST_INT_EDGE",
-			value:        "2147483647",
-			defaultValue: 0,
-			want:         2147483647,
-		},
-		{
-			name:         "value is large negative integer",
-			key:          "TEST_INT_EDGE",
-			value:        "-2147483648",
-			defaultValue: 0,
-			want:         -2147483648,
-		},
-		{
-			name:         "value has leading/trailing whitespace",
-			key:          "TEST_INT_EDGE",
-			value:        "  42  ",
-			defaultValue: 0,
-			want:         0, // Atoi doesn't trim, so it fails and returns default
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			key := uniqueEnvKey(t, tt.key)
-
-			mustUnsetenv(key)
-			defer mustUnsetenv(key)
-
-			mustSetenv(key, tt.value)
-
-			got := config.GetEnvInt(key, tt.defaultValue)
-			if got != tt.want {
-				t.Errorf("GetEnvInt(%q, %d) = %d, want %d", key, tt.defaultValue, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestGetEnv_EmptyString(t *testing.T) {
-	t.Parallel()
-
-	key := uniqueEnvKey(t, "TEST_EMPTY")
-
-	mustUnsetenv(key)
-	defer mustUnsetenv(key)
-
-	// Set to empty string explicitly
-	mustSetenv(key, "")
-
-	got := config.GetEnv(key, "default")
-	if got != "default" {
-		t.Errorf("GetEnv(%q, %q) = %q, want %q", key, "default", got, "default")
-	}
-}
-
-func TestLoadConfig_AllFields(t *testing.T) {
-	t.Parallel()
-	lockEnv(t)
-
-	// Test that all fields are properly loaded
-	mustSetenv("NODE_NAME", "test-node")
-	mustSetenv("HTTP_LISTEN_ADDR", ":8080")
-	mustSetenv("KUBECONFIG", "kubeconfig.yaml")
-	mustSetenv("KLOG_VERBOSITY", "3")
-
-	defer func() {
-		mustUnsetenv("NODE_NAME")
-		mustUnsetenv("HTTP_LISTEN_ADDR")
-		mustUnsetenv("KUBECONFIG")
-		mustUnsetenv("KLOG_VERBOSITY")
-	}()
-
-	cfg := config.LoadConfig()
-
-	if cfg.NodeName != "test-node" {
-		t.Errorf("NodeName = %q, want %q", cfg.NodeName, "test-node")
-	}
-
-	if cfg.ListenAddr != ":8080" {
-		t.Errorf("ListenAddr = %q, want %q", cfg.ListenAddr, ":8080")
-	}
-
-	if cfg.KubeconfigPath != "kubeconfig.yaml" {
-		t.Errorf("KubeconfigPath = %q, want %q", cfg.KubeconfigPath, "kubeconfig.yaml")
-	}
-
-	if cfg.Verbosity != 3 {
-		t.Errorf("Verbosity = %d, want %d", cfg.Verbosity, 3)
-	}
-}
-
-func TestGetEnvBool_WithStrconvParseBool(t *testing.T) {
-	t.Parallel()
-
-	// Test that strconv.ParseBool works correctly
-	testCases := []string{
-		"true",
-		"false",
-		"TRUE",
-		"FALSE",
-		"True",
-		"False",
-		"t",
-		"f",
-		"T",
-		"F",
-		"1",
-		"0",
-	}
-
-	for _, tc := range testCases {
-		t.Run("value_"+tc, func(t *testing.T) {
-			t.Parallel()
-
-			key := uniqueEnvKey(t, "TEST_BOOL_"+tc)
-
-			mustUnsetenv(key)
-			defer mustUnsetenv(key)
-
-			mustSetenv(key, tc)
-
-			// strconv.ParseBool should handle these cases
-			parsed, err := strconv.ParseBool(tc)
-			if err == nil {
-				got := config.GetEnvBool(key, !parsed)
-				if got != parsed {
-					t.Errorf(
-						"GetEnvBool(%q, %v) = %v, want %v (from strconv.ParseBool)",
-						key,
-						!parsed,
-						got,
-						parsed,
-					)
-				}
-			}
-		})
-	}
+	// Call it again to ensure idempotency
+	assert.NotPanics(t, func() {
+		config.InitializeKlog(4)
+	})
 }

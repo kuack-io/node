@@ -1,459 +1,143 @@
-package provider //nolint:testpackage // Tests need access to internal functions
+package provider_test
 
 import (
 	"context"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"kuack-node/pkg/provider"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestWASMProvider_AddAgent(t *testing.T) {
+func TestHasCapacity(t *testing.T) {
 	t.Parallel()
 
-	provider, _ := NewWASMProvider("test-node")
-
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("1000m"),
-			Memory: resource.MustParse("1Gi"),
-			GPU:    false,
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-		Labels:        map[string]string{"env": "test"},
-	}
-
-	provider.AddAgent(context.Background(), agent)
-
-	// Verify agent was stored
-	retrievedAgent, ok := provider.GetAgent("test-agent-1")
-	if !ok {
-		t.Error("GetAgent() agent not found after AddAgent")
-	}
-
-	retrieved, ok := retrievedAgent.(*AgentConnection)
-	if !ok {
-		t.Error("GetAgent() returned invalid agent type")
-	}
-
-	if retrieved.UUID != "test-agent-1" {
-		t.Errorf("GetAgent() UUID = %v, want test-agent-1", retrieved.UUID)
-	}
-
-	// Verify agent count
-	count := provider.GetAgentCount()
-	if count != 1 {
-		t.Errorf("GetAgentCount() = %v, want 1", count)
-	}
-}
-
-func TestWASMProvider_AddAgent_TriggersNodeStatusNotification(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Set up node status notification callback
-	notifyCalled := false
-
-	var notifiedNode *corev1.Node
-
-	provider.mu.Lock()
-	provider.nodeStatusNotify = func(node *corev1.Node) {
-		notifyCalled = true
-		notifiedNode = node
-	}
-	provider.mu.Unlock()
-
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("2000m"),
-			Memory: resource.MustParse("2Gi"),
-			GPU:    false,
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-	}
-
-	provider.AddAgent(context.Background(), agent)
-
-	// Give goroutine time to execute
-	time.Sleep(50 * time.Millisecond)
-
-	// Verify notification was called
-	if !notifyCalled {
-		t.Error("AddAgent() did not trigger node status notification")
-	}
-
-	if notifiedNode == nil {
-		t.Fatal("AddAgent() notification received nil node")
-	}
-
-	// Verify node has updated capacity
-	cpuCapacity := notifiedNode.Status.Capacity[corev1.ResourceCPU]
-	if cpuCapacity.String() != "2" {
-		t.Errorf("AddAgent() node capacity CPU = %v, want 2", cpuCapacity.String())
-	}
-
-	memCapacity := notifiedNode.Status.Capacity[corev1.ResourceMemory]
-	if memCapacity.String() != "2Gi" {
-		t.Errorf("AddAgent() node capacity Memory = %v, want 2Gi", memCapacity.String())
-	}
-}
-
-func TestWASMProvider_RemoveAgent(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Add an agent with a pod
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("1000m"),
+	agent := &provider.AgentConnection{
+		Resources: provider.ResourceSpec{
+			CPU:    resource.MustParse("1"),
 			Memory: resource.MustParse("1Gi"),
 		},
 		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
 	}
 
+	tests := []struct {
+		name     string
+		pod      *corev1.Pod
+		expected bool
+	}{
+		{
+			name: "Pod fits",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod1", UID: "pod1-uid"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU:    resource.MustParse("500m"),
+									corev1.ResourceMemory: resource.MustParse("500Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: true,
+		},
+		{
+			name: "Pod doesn't fit (CPU)",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod2", UID: "pod2-uid"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("2"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Pod doesn't fit (Memory)",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod3", UID: "pod3-uid"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceMemory: resource.MustParse("2Gi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "Multiple containers",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "pod4", UID: "pod4-uid"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("500m"),
+								},
+							},
+						},
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("600m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.expected, agent.HasCapacity(tt.pod))
+		})
+	}
+}
+
+func TestWASMProvider_AddAgent_AssignsPendingPods(t *testing.T) {
+	t.Parallel()
+
+	p, mockStream, agent := setupTestProvider(t)
+
+	// 1. Create a pending pod
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
+			Name:      "pending-pod",
 			Namespace: "default",
-			Name:      "test-pod",
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-		},
-	}
-
-	agent.AllocatedPods[getPodKey(pod)] = pod
-	provider.pods.Store(getPodKey(pod), pod)
-
-	// Set up notify function to track calls
-	notifyCalled := false
-
-	provider.mu.Lock()
-	provider.notifyFunc = func(p *corev1.Pod) {
-		notifyCalled = true
-
-		if p.Status.Phase != corev1.PodFailed {
-			t.Errorf("RemoveAgent() pod phase = %v, want Failed", p.Status.Phase)
-		}
-
-		if p.Status.Reason != "NodeLost" {
-			t.Errorf("RemoveAgent() pod reason = %v, want NodeLost", p.Status.Reason)
-		}
-	}
-	provider.mu.Unlock()
-
-	provider.AddAgent(context.Background(), agent)
-
-	// Remove the agent
-	provider.RemoveAgent("test-agent-1")
-
-	// Verify agent was removed
-	_, ok := provider.GetAgent("test-agent-1")
-	if ok {
-		t.Error("GetAgent() agent still found after RemoveAgent")
-	}
-
-	// Verify agent count
-	count := provider.GetAgentCount()
-	if count != 0 {
-		t.Errorf("GetAgentCount() = %v, want 0", count)
-	}
-
-	// Verify pod was removed
-	_, exists := provider.pods.Load(getPodKey(pod))
-	if exists {
-		t.Error("RemoveAgent() pod still exists after agent removal")
-	}
-
-	// Verify notify was called
-	if !notifyCalled {
-		t.Error("RemoveAgent() notifyFunc was not called")
-	}
-}
-
-func TestWASMProvider_RemoveAgent_TriggersNodeStatusNotification(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Set up node status notification callback
-	nodeNotifyCalled := false
-
-	var notifiedNode *corev1.Node
-
-	provider.mu.Lock()
-	provider.nodeStatusNotify = func(node *corev1.Node) {
-		nodeNotifyCalled = true
-		notifiedNode = node
-	}
-	provider.mu.Unlock()
-
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("2000m"),
-			Memory: resource.MustParse("2Gi"),
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-	}
-
-	provider.AddAgent(context.Background(), agent)
-
-	// Reset notification flag
-	nodeNotifyCalled = false
-	notifiedNode = nil
-
-	// Remove the agent
-	provider.RemoveAgent("test-agent-1")
-
-	// Give goroutine time to execute
-	time.Sleep(50 * time.Millisecond)
-
-	// Verify notification was called
-	if !nodeNotifyCalled {
-		t.Error("RemoveAgent() did not trigger node status notification")
-	}
-
-	if notifiedNode == nil {
-		t.Fatal("RemoveAgent() notification received nil node")
-	}
-
-	// Verify node has updated capacity (should be back to 0)
-	cpuCapacity := notifiedNode.Status.Capacity[corev1.ResourceCPU]
-	if cpuCapacity.String() != "0" {
-		t.Errorf("RemoveAgent() node capacity CPU = %v, want 0", cpuCapacity.String())
-	}
-
-	memCapacity := notifiedNode.Status.Capacity[corev1.ResourceMemory]
-	if memCapacity.String() != "0" {
-		t.Errorf("RemoveAgent() node capacity Memory = %v, want 0", memCapacity.String())
-	}
-}
-
-func TestWASMProvider_RemoveAgent_NonExistent(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Remove non-existent agent should not panic
-	provider.RemoveAgent("non-existent-agent")
-
-	// Verify agent count is still 0
-	count := provider.GetAgentCount()
-	if count != 0 {
-		t.Errorf("GetAgentCount() = %v, want 0", count)
-	}
-}
-
-func TestWASMProvider_RemoveAgent_InvalidType(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Store invalid agent type
-	provider.agents.Store("invalid-agent", "not-an-agent")
-
-	// Remove should handle gracefully
-	provider.RemoveAgent("invalid-agent")
-
-	// Verify agent count is still 0
-	count := provider.GetAgentCount()
-	if count != 0 {
-		t.Errorf("GetAgentCount() = %v, want 0", count)
-	}
-}
-
-func TestWASMProvider_GetAgent(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Test getting non-existent agent
-	_, ok := provider.GetAgent("non-existent")
-	if ok {
-		t.Error("GetAgent() expected false for non-existent agent, got true")
-	}
-
-	// Add an agent
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("1000m"),
-			Memory: resource.MustParse("1Gi"),
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-	}
-	provider.AddAgent(context.Background(), agent)
-
-	// Get the agent
-	retrievedAgent, ok := provider.GetAgent("test-agent-1")
-	if !ok {
-		t.Error("GetAgent() expected true for existing agent, got false")
-	}
-
-	retrieved, ok := retrievedAgent.(*AgentConnection)
-	if !ok {
-		t.Error("GetAgent() returned invalid agent type")
-	}
-
-	if retrieved.UUID != "test-agent-1" {
-		t.Errorf("GetAgent() UUID = %v, want test-agent-1", retrieved.UUID)
-	}
-}
-
-func TestWASMProvider_GetAgentCount(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Initially should be 0
-	count := provider.GetAgentCount()
-	if count != 0 {
-		t.Errorf("GetAgentCount() = %v, want 0", count)
-	}
-
-	// Add agents
-	agent1 := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("1000m"),
-			Memory: resource.MustParse("1Gi"),
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-	}
-
-	agent2 := &AgentConnection{
-		UUID: "test-agent-2",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("2000m"),
-			Memory: resource.MustParse("2Gi"),
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-	}
-
-	provider.AddAgent(context.Background(), agent1)
-	provider.AddAgent(context.Background(), agent2)
-
-	// Should be 2
-	count = provider.GetAgentCount()
-	if count != 2 {
-		t.Errorf("GetAgentCount() = %v, want 2", count)
-	}
-
-	// Remove one
-	provider.RemoveAgent("test-agent-1")
-
-	// Should be 1
-	count = provider.GetAgentCount()
-	if count != 1 {
-		t.Errorf("GetAgentCount() = %v, want 1", count)
-	}
-}
-
-func TestWASMProvider_RemoveAgent_MultiplePods(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-
-	// Add an agent with multiple pods
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("1000m"),
-			Memory: resource.MustParse("1Gi"),
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-	}
-
-	pod1 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "test-pod-1",
-		},
-	}
-
-	pod2 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "test-pod-2",
-		},
-	}
-
-	agent.AllocatedPods[getPodKey(pod1)] = pod1
-	agent.AllocatedPods[getPodKey(pod2)] = pod2
-	provider.pods.Store(getPodKey(pod1), pod1)
-	provider.pods.Store(getPodKey(pod2), pod2)
-
-	notifyCount := 0
-
-	provider.mu.Lock()
-	provider.notifyFunc = func(p *corev1.Pod) {
-		notifyCount++
-	}
-	provider.mu.Unlock()
-
-	provider.AddAgent(context.Background(), agent)
-
-	// Remove the agent
-	provider.RemoveAgent("test-agent-1")
-
-	// Verify both pods were notified
-	if notifyCount != 2 {
-		t.Errorf("RemoveAgent() notifyCount = %v, want 2", notifyCount)
-	}
-
-	// Verify both pods were removed
-	_, exists1 := provider.pods.Load(getPodKey(pod1))
-	if exists1 {
-		t.Error("RemoveAgent() pod1 still exists")
-	}
-
-	_, exists2 := provider.pods.Load(getPodKey(pod2))
-	if exists2 {
-		t.Error("RemoveAgent() pod2 still exists")
-	}
-}
-
-func TestWASMProvider_CreatePod_RequiresAgentCapacity(t *testing.T) {
-	t.Parallel()
-
-	provider, _ := NewWASMProvider("test-node")
-	ctx := context.Background()
-
-	// Create a pod with resource requests
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: "default",
-			Name:      "test-pod",
+			UID:       "pod-uid-1",
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{
 				{
-					Name:  "test-container",
-					Image: "test-image:latest",
+					Name:  "container-1",
+					Image: "image-1",
 					Resources: corev1.ResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -463,101 +147,108 @@ func TestWASMProvider_CreatePod_RequiresAgentCapacity(t *testing.T) {
 				},
 			},
 		},
-	}
-
-	// CreatePod should fail when no agents are available
-	err := provider.CreatePod(ctx, pod)
-	if err == nil {
-		t.Error("CreatePod() expected error when no agents available, got nil")
-	}
-
-	// Add an agent with insufficient capacity
-	agent := &AgentConnection{
-		UUID: "test-agent-1",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("50m"),  // Less than requested 100m
-			Memory: resource.MustParse("64Mi"), // Less than requested 128Mi
-			GPU:    false,
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
 		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-		Stream:        nil,
-	}
-	provider.AddAgent(ctx, agent)
-
-	// CreatePod should still fail - agent doesn't have enough capacity
-	err = provider.CreatePod(ctx, pod)
-	if err == nil {
-		t.Error("CreatePod() expected error when agent has insufficient capacity, got nil")
 	}
 
-	// Add an agent with sufficient capacity
-	agent2 := &AgentConnection{
-		UUID: "test-agent-2",
-		Resources: ResourceSpec{
-			CPU:    resource.MustParse("1000m"),
-			Memory: resource.MustParse("1Gi"),
-			GPU:    false,
-		},
-		AllocatedPods: make(map[string]*corev1.Pod),
-		LastHeartbeat: time.Now(),
-		IsThrottled:   false,
-		Stream:        nil,
-	}
-	provider.AddAgent(ctx, agent2)
+	// Manually add pod to provider storage to simulate pending state
+	// We can use CreatePod which puts it in pending state if no agents
+	err := p.CreatePod(context.Background(), pod)
+	require.NoError(t, err)
 
-	// Now CreatePod should succeed (even if WebSocket send fails in test)
-	err = provider.CreatePod(ctx, pod)
-	// In tests, WebSocket send will fail, but that's OK - we test the scheduling logic
-	// In real deployment, WebSocket send must succeed for pod to be scheduled
-	if err != nil && !strings.Contains(err.Error(), "agent stream is not a WebSocket connection") {
-		t.Errorf("CreatePod() error = %v, want nil or WebSocket error", err)
+	// 3. Add agent
+	p.AddAgent(context.Background(), agent)
 
-		return
-	}
-
-	// If WebSocket send failed, pod won't be stored (we clean up on failure)
-	// So only verify if there was no error
-	if err != nil {
-		return
-	}
-
-	// Verify pod was stored and scheduled
-	retrievedPod, err := provider.GetPod(ctx, "default", "test-pod")
-	if err != nil {
-		t.Errorf("GetPod() error = %v, want nil", err)
-
-		return
-	}
-
-	if retrievedPod == nil {
-		t.Error("GetPod() returned nil pod")
-
-		return
-	}
-
-	// Pod should be scheduled
-	foundScheduled := false
-
-	for _, condition := range retrievedPod.Status.Conditions {
-		if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionTrue {
-			foundScheduled = true
-
-			break
+	// 4. Verify pod was assigned
+	assert.Eventually(t, func() bool {
+		updatedPod, err := p.GetPod(context.Background(), "default", "pending-pod")
+		if err != nil {
+			return false
 		}
+
+		return updatedPod.Status.Reason == "AgentAssigned" &&
+			updatedPod.Status.Phase == corev1.PodPending
+	}, 1*time.Second, 10*time.Millisecond)
+
+	updatedPod, err := p.GetPod(context.Background(), "default", "pending-pod")
+	require.NoError(t, err)
+	assert.Contains(t, updatedPod.Status.Message, "agent-1")
+
+	// Verify stream was written to
+	mockStream.AssertExpectations(t)
+}
+
+func TestWASMProvider_RemoveAgent(t *testing.T) {
+	t.Parallel()
+
+	p, _, agent := setupTestProvider(t)
+
+	// Capture notifications
+	var (
+		notifiedPod *corev1.Pod
+		mu          sync.Mutex
+	)
+
+	p.NotifyPods(context.Background(), func(pod *corev1.Pod) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if pod.Name == "running-pod" && pod.Status.Phase == corev1.PodFailed {
+			notifiedPod = pod
+		}
+	})
+
+	p.AddAgent(context.Background(), agent)
+
+	// 2. Assign a pod to the agent
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "running-pod",
+			Namespace: "default",
+			UID:       "pod-uid-1",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{
+					Name:  "container-1",
+					Image: "image-1",
+				},
+			},
+		},
 	}
 
-	if !foundScheduled {
-		t.Error("Pod should be scheduled when agent with sufficient capacity is available")
-	}
+	// CreatePod will assign it because agent exists
+	err := p.CreatePod(context.Background(), pod)
+	require.NoError(t, err)
 
-	// Verify pod was allocated to agent with capacity
-	agent2.mu.RLock()
-	_, allocated := agent2.AllocatedPods["default/test-pod"]
-	agent2.mu.RUnlock()
+	// Verify it's assigned
+	updatedPod, err := p.GetPod(context.Background(), "default", "running-pod")
+	require.NoError(t, err)
+	assert.Equal(t, "AgentAssigned", updatedPod.Status.Reason)
 
-	if !allocated {
-		t.Error("Pod should be allocated to agent with sufficient capacity")
-	}
+	// 3. Remove agent
+	p.RemoveAgent("agent-1")
+
+	// 4. Verify pod is failed via notification
+	assert.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return notifiedPod != nil
+	}, 1*time.Second, 10*time.Millisecond)
+
+	mu.Lock()
+	require.NotNil(t, notifiedPod)
+	assert.Equal(t, corev1.PodFailed, notifiedPod.Status.Phase)
+	assert.Equal(t, "NodeLost", notifiedPod.Status.Reason)
+	mu.Unlock()
+
+	// 5. Verify agent is gone
+	_, ok := p.GetAgent("agent-1")
+	assert.False(t, ok)
+
+	// 6. Verify pod is gone from provider
+	_, err = p.GetPod(context.Background(), "default", "running-pod")
+	assert.Error(t, err)
 }

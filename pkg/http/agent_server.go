@@ -3,18 +3,20 @@ package http
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
+
+	"kuack-node/pkg/provider"
+	"kuack-node/pkg/server"
 
 	"github.com/gorilla/websocket"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
-	"kuack-node/pkg/provider"
 )
 
 const (
@@ -32,8 +34,6 @@ const (
 	httpReadTimeout = 15 * time.Second
 	// httpWriteTimeout is the HTTP server write timeout.
 	httpWriteTimeout = 15 * time.Second
-	// httpIdleTimeout is the HTTP server idle timeout.
-	httpIdleTimeout = 60 * time.Second
 	// closeCodeDuplicateBrowser is the WebSocket close code used when closing
 	// a connection due to a duplicate browser connection (same browser ID).
 	// Using 4001 (in the 4000-4999 range reserved for libraries/frameworks).
@@ -55,16 +55,17 @@ func getUpgrader() websocket.Upgrader {
 // Config holds HTTP server configuration.
 type Config struct {
 	ListenAddr string
-	Provider   *provider.WASMProvider
+	Provider   provider.AgentManager
+	AgentToken string
 }
 
-// Server manages HTTP/WebSocket connections from browser agents.
-type Server struct {
+// AgentServer manages HTTP/WebSocket connections from browser agents.
+type AgentServer struct {
+	*server.BaseHTTPServer
+
 	config          *Config
-	server          *http.Server
 	browserIDToUUID map[string]string // Maps browser ID to agent UUID
 	browserIDMutex  sync.RWMutex      // Protects browserIDToUUID map
-	registryProxy   *RegistryProxy
 }
 
 // Message types for agent communication protocol.
@@ -84,6 +85,13 @@ type PodStatusData struct {
 	Status    provider.AgentPodStatus `json:"status"`
 }
 
+// PodLogsData represents a log chunk pushed from an agent.
+type PodLogsData struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	Log       string `json:"log"`
+}
+
 // Message represents a protocol message.
 type Message struct {
 	Type      string          `json:"type"`
@@ -99,6 +107,7 @@ type RegisterData struct {
 	Memory    string            `json:"memory"`    // e.g., "8Gi"
 	GPU       bool              `json:"gpu"`
 	Labels    map[string]string `json:"labels"`
+	Token     string            `json:"token"`
 }
 
 // HeartbeatData is sent periodically by agents.
@@ -107,91 +116,40 @@ type HeartbeatData struct {
 	IsThrottled bool   `json:"isThrottled"` // Page Visibility API state
 }
 
-// NewServer creates a new HTTP server instance.
-func NewServer(config *Config) (*Server, error) {
-	return &Server{
+// NewAgentServer creates a new HTTP server instance.
+func NewAgentServer(config *Config) (*AgentServer, error) {
+	s := &AgentServer{
 		config:          config,
 		browserIDToUUID: make(map[string]string),
-		registryProxy:   NewRegistryProxy(),
-	}, nil
-}
+	}
 
-// Start begins listening for agent connections.
-func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", s.handleRoot)
-	mux.HandleFunc("/ws", s.handleWebSocket)
-	mux.HandleFunc("/registry", s.handleRegistryProxy)
+	mux.HandleFunc("/", s.handleWebSocket)
 
-	// Create listener first to get the actual address
-	lc := net.ListenConfig{}
+	var port int
 
-	listener, err := lc.Listen(ctx, "tcp", s.config.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("failed to create listener: %w", err)
-	}
-
-	s.server = &http.Server{
-		Handler:      mux,
-		ReadTimeout:  httpReadTimeout,
-		WriteTimeout: httpWriteTimeout,
-		IdleTimeout:  httpIdleTimeout,
-	}
-
-	klog.Infof("Starting HTTP server on %s", listener.Addr().String())
-
-	// Start server in a goroutine
-	errChan := make(chan error, 1)
-
-	go func() {
-		err := s.server.Serve(listener)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errChan <- err
-		}
-	}()
-
-	klog.Info("HTTP server is ready, waiting for agent connections")
-
-	// Wait for context cancellation or server error
-	select {
-	case <-ctx.Done():
-		return fmt.Errorf("server context cancelled: %w", ctx.Err())
-	case err := <-errChan:
-		return fmt.Errorf("server error: %w", err)
-	}
-}
-
-// Shutdown gracefully stops the server.
-func (s *Server) Shutdown(ctx context.Context) error {
-	if s.server != nil {
-		klog.Info("Shutting down HTTP server")
-
-		err := s.server.Shutdown(ctx)
+	if config.ListenAddr != "" {
+		// Parse port from ListenAddr
+		_, portStr, err := net.SplitHostPort(config.ListenAddr)
 		if err != nil {
-			return fmt.Errorf("failed to shutdown server: %w", err)
+			return nil, fmt.Errorf("invalid listen address: %w", err)
 		}
 
-		return nil
+		var errAtoi error
+
+		port, errAtoi = strconv.Atoi(portStr)
+		if errAtoi != nil {
+			return nil, fmt.Errorf("invalid port: %w", errAtoi)
+		}
 	}
 
-	return nil
-}
+	s.BaseHTTPServer = server.NewBaseHTTPServer("Agent Server", port, mux, httpReadTimeout, httpWriteTimeout)
 
-// handleRoot handles root HTTP requests.
-func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/plain")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("kuack-node HTTP server\n"))
+	return s, nil
 }
 
 // handleWebSocket handles WebSocket connections from agents.
-func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+func (s *AgentServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := getUpgrader()
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -223,12 +181,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.handleAgent(ctx, conn)
 }
 
-func (s *Server) handleRegistryProxy(w http.ResponseWriter, r *http.Request) {
-	s.registryProxy.ServeHTTP(w, r)
-}
-
 // handleAgent manages a single agent connection.
-func (s *Server) handleAgent(ctx context.Context, conn *websocket.Conn) {
+func (s *AgentServer) handleAgent(ctx context.Context, conn *websocket.Conn) {
 	klog.Info("New agent connection established")
 
 	var agentUUID string
@@ -262,6 +216,22 @@ func (s *Server) handleAgent(ctx context.Context, conn *websocket.Conn) {
 		klog.Errorf("Failed to unmarshal registration data: %v", err)
 
 		return
+	}
+
+	// Validate token if configured
+	if s.config.AgentToken != "" {
+		if regData.Token != s.config.AgentToken {
+			klog.Warningf("Agent registration failed: invalid token from UUID %s", regData.UUID)
+			// Send an error message and close connection
+			errMsg := Message{
+				Type:      "error",
+				Timestamp: time.Now(),
+				Data:      json.RawMessage(`{"error": "unauthorized"}`),
+			}
+			_ = s.sendMessage(conn, &errMsg)
+
+			return
+		}
 	}
 
 	agentUUID = regData.UUID
@@ -360,7 +330,7 @@ func (s *Server) handleAgent(ctx context.Context, conn *websocket.Conn) {
 }
 
 // handleMessage processes messages from agents.
-func (s *Server) handleMessage(agentUUID string, msg *Message) {
+func (s *AgentServer) handleMessage(agentUUID string, msg *Message) {
 	switch msg.Type {
 	case MsgTypeHeartbeat:
 		var heartbeatData HeartbeatData
@@ -410,8 +380,29 @@ func (s *Server) handleMessage(agentUUID string, msg *Message) {
 			Infof("Updated pod status for %s/%s from agent %s", statusData.Namespace, statusData.Name, agentUUID)
 
 	case MsgTypePodLogs:
-		// TODO: Handle log streaming from agent
-		klog.V(logVerboseLevel).Infof("Received pod logs from agent %s", agentUUID)
+		if s.config.Provider == nil {
+			klog.Warning("Received pod logs but provider is nil")
+
+			return
+		}
+
+		var logsData PodLogsData
+
+		err := json.Unmarshal(msg.Data, &logsData)
+		if err != nil {
+			klog.Errorf("Failed to unmarshal pod logs: %v", err)
+
+			return
+		}
+
+		if logsData.Namespace == "" || logsData.Name == "" {
+			klog.Warning("Pod logs missing namespace or name")
+
+			return
+		}
+
+		s.config.Provider.AppendPodLog(logsData.Namespace, logsData.Name, logsData.Log)
+		klog.V(logVerboseLevel).Infof("Received pod logs for %s/%s from agent %s", logsData.Namespace, logsData.Name, agentUUID)
 
 	default:
 		klog.Warningf("Unknown message type: %s", msg.Type)
@@ -419,16 +410,9 @@ func (s *Server) handleMessage(agentUUID string, msg *Message) {
 }
 
 // handleHeartbeat processes heartbeat from an agent.
-func (s *Server) handleHeartbeat(agentUUID string, isThrottled bool) {
-	agentVal, ok := s.config.Provider.GetAgent(agentUUID)
+func (s *AgentServer) handleHeartbeat(agentUUID string, isThrottled bool) {
+	agent, ok := s.config.Provider.GetAgent(agentUUID)
 	if !ok {
-		return
-	}
-
-	agent, ok := agentVal.(*provider.AgentConnection)
-	if !ok {
-		klog.Errorf("Invalid agent type for UUID: %s", agentUUID)
-
 		return
 	}
 
@@ -441,7 +425,7 @@ func (s *Server) handleHeartbeat(agentUUID string, isThrottled bool) {
 }
 
 // monitorHeartbeat checks for agent timeouts.
-func (s *Server) monitorHeartbeat(ctx context.Context, agentUUID string) {
+func (s *AgentServer) monitorHeartbeat(ctx context.Context, agentUUID string) {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -450,15 +434,8 @@ func (s *Server) monitorHeartbeat(ctx context.Context, agentUUID string) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			agentVal, ok := s.config.Provider.GetAgent(agentUUID)
+			agent, ok := s.config.Provider.GetAgent(agentUUID)
 			if !ok {
-				return
-			}
-
-			agent, ok := agentVal.(*provider.AgentConnection)
-			if !ok {
-				klog.Errorf("Invalid agent type for UUID: %s", agentUUID)
-
 				return
 			}
 
@@ -473,14 +450,14 @@ func (s *Server) monitorHeartbeat(ctx context.Context, agentUUID string) {
 }
 
 // registerAgent adds an agent to the provider.
-func (s *Server) registerAgent(ctx context.Context, agent *provider.AgentConnection) {
+func (s *AgentServer) registerAgent(ctx context.Context, agent *provider.AgentConnection) {
 	s.config.Provider.AddAgent(ctx, agent)
 	klog.Infof("Agent %s registered with provider", agent.UUID)
 }
 
 // handleDuplicateBrowserConnection checks if a browser ID is already connected
 // and closes the old connection if found.
-func (s *Server) handleDuplicateBrowserConnection(browserID, newAgentUUID string) {
+func (s *AgentServer) handleDuplicateBrowserConnection(browserID, newAgentUUID string) {
 	s.browserIDMutex.Lock()
 	existingUUID, exists := s.browserIDToUUID[browserID]
 	s.browserIDMutex.Unlock()
@@ -495,12 +472,7 @@ func (s *Server) handleDuplicateBrowserConnection(browserID, newAgentUUID string
 		existingUUID,
 	)
 
-	oldAgentVal, ok := s.config.Provider.GetAgent(existingUUID)
-	if !ok {
-		return
-	}
-
-	oldAgent, ok := oldAgentVal.(*provider.AgentConnection)
+	oldAgent, ok := s.config.Provider.GetAgent(existingUUID)
 	if !ok {
 		return
 	}
@@ -528,7 +500,7 @@ func (s *Server) handleDuplicateBrowserConnection(browserID, newAgentUUID string
 }
 
 // handleAgentDisconnect cleans up when an agent disconnects.
-func (s *Server) handleAgentDisconnect(agentUUID string) {
+func (s *AgentServer) handleAgentDisconnect(agentUUID string) {
 	klog.Infof("Handling disconnect for agent %s", agentUUID)
 
 	// Find and remove browser ID mapping
@@ -550,6 +522,6 @@ func (s *Server) handleAgentDisconnect(agentUUID string) {
 }
 
 // sendMessage sends a message to an agent via WebSocket.
-func (s *Server) sendMessage(conn *websocket.Conn, msg *Message) error {
+func (s *AgentServer) sendMessage(conn *websocket.Conn, msg *Message) error {
 	return conn.WriteJSON(msg)
 }

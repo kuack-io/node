@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,29 +17,38 @@ const (
 
 	// DefaultNodeName is the default node name.
 	DefaultNodeName = "wasm-node"
-	// DefaultListenAddr is the default HTTP listen address.
-	DefaultListenAddr = ":8080"
+	// DefaultPublicPort is the default public server port.
+	DefaultPublicPort = 8080
+	// DefaultInternalPort is the default internal server port.
+	DefaultInternalPort = 10250
 	// DefaultKlogVerbosity is the default klog verbosity level.
 	DefaultKlogVerbosity = 2
 )
 
 var (
-	//nolint:gochecknoglobals // klog initialization must happen only once across all tests
+	//nolint:gochecknoglobals // klog's global flags can only be toggled once per process, so the guard must be package-level state
 	klogInitialized bool
-	klogInitMutex   sync.Mutex //nolint:gochecknoglobals // mutex for klog initialization
+	klogInitMutex   sync.Mutex //nolint:gochecknoglobals // companion mutex protects the global flag without passing locks everywhere
 )
+
+// EnvGetter is a function that looks up an environment variable.
+type EnvGetter func(string) string
 
 // Config holds application configuration.
 type Config struct {
 	NodeName       string
-	ListenAddr     string
+	PublicPort     int
+	InternalPort   int
+	TLSCertFile    string
+	TLSKeyFile     string
+	AgentToken     string
 	KubeconfigPath string
 	Verbosity      int
 }
 
 // GetEnv returns the value of an environment variable or a default value if not set.
-func GetEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
+func GetEnv(get EnvGetter, key, defaultValue string) string {
+	if value := get(key); value != "" {
 		return value
 	}
 
@@ -48,8 +56,8 @@ func GetEnv(key, defaultValue string) string {
 }
 
 // GetEnvBool returns the boolean value of an environment variable or a default value if not set.
-func GetEnvBool(key string, defaultValue bool) bool {
-	if value := os.Getenv(key); value != "" {
+func GetEnvBool(get EnvGetter, key string, defaultValue bool) bool {
+	if value := get(key); value != "" {
 		parsed, err := strconv.ParseBool(value)
 		if err == nil {
 			return parsed
@@ -62,8 +70,8 @@ func GetEnvBool(key string, defaultValue bool) bool {
 }
 
 // GetEnvInt returns the integer value of an environment variable or a default value if not set.
-func GetEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
+func GetEnvInt(get EnvGetter, key string, defaultValue int) int {
+	if value := get(key); value != "" {
 		parsed, err := strconv.Atoi(value)
 		if err == nil {
 			return parsed
@@ -74,14 +82,16 @@ func GetEnvInt(key string, defaultValue int) int {
 }
 
 // LoadConfig reads configuration from environment variables.
-func LoadConfig() *Config {
-	listenAddr := GetEnv("HTTP_LISTEN_ADDR", DefaultListenAddr)
-
+func LoadConfig(get EnvGetter) *Config {
 	return &Config{
-		NodeName:       GetEnv("NODE_NAME", DefaultNodeName),
-		ListenAddr:     listenAddr,
-		KubeconfigPath: GetEnv("KUBECONFIG", ""),
-		Verbosity:      GetEnvInt("KLOG_VERBOSITY", DefaultKlogVerbosity),
+		NodeName:       GetEnv(get, "NODE_NAME", DefaultNodeName),
+		PublicPort:     GetEnvInt(get, "PUBLIC_PORT", DefaultPublicPort),
+		InternalPort:   GetEnvInt(get, "INTERNAL_PORT", DefaultInternalPort),
+		TLSCertFile:    GetEnv(get, "TLS_CERT_FILE", ""),
+		TLSKeyFile:     GetEnv(get, "TLS_KEY_FILE", ""),
+		AgentToken:     GetEnv(get, "AGENT_TOKEN", ""),
+		KubeconfigPath: GetEnv(get, "KUBECONFIG", ""),
+		Verbosity:      GetEnvInt(get, "KLOG_VERBOSITY", DefaultKlogVerbosity),
 	}
 }
 

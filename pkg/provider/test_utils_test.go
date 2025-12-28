@@ -22,7 +22,7 @@ func (m *MockAgentStream) SetWriteDeadline(t time.Time) error {
 	return args.Error(0)
 }
 
-func (m *MockAgentStream) WriteJSON(v interface{}) error {
+func (m *MockAgentStream) WriteJSON(v any) error {
 	args := m.Called(v)
 
 	return args.Error(0)

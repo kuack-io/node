@@ -40,7 +40,7 @@ func (p *WASMProvider) assignPendingPodsToAgent(ctx context.Context, agent *Agen
 	var pendingPods []*corev1.Pod
 
 	// Collect all pending pods that are not yet assigned to an agent
-	p.pods.Range(func(key, value interface{}) bool {
+	p.pods.Range(func(key, value any) bool {
 		if ctx != nil && ctx.Err() != nil {
 			return false
 		}

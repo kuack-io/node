@@ -236,9 +236,9 @@ func TestAgentServer_Errors(t *testing.T) {
 			UUID:   "agent-uuid-wrong",
 		}
 		err = conn.WriteJSON(struct {
-			Type      string      `json:"type"`
-			Timestamp time.Time   `json:"timestamp"`
-			Data      interface{} `json:"data"`
+			Type      string    `json:"type"`
+			Timestamp time.Time `json:"timestamp"`
+			Data      any       `json:"data"`
 		}{
 			Type:      http.MsgTypeRegister,
 			Timestamp: time.Now(),
@@ -291,6 +291,7 @@ func TestAgentServer_Errors(t *testing.T) {
 		mockProvider.ExpectedCalls = nil // Clear previous expectations
 		mockProvider.On("AddAgent", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 			var ok bool
+
 			capturedAgent, ok = args.Get(1).(*provider.AgentConnection)
 			if !ok {
 				panic("AddAgent called with wrong type")
@@ -324,9 +325,9 @@ func TestAgentServer_Errors(t *testing.T) {
 			BrowserID: "browser-1",
 		}
 		err = conn1.WriteJSON(struct {
-			Type      string      `json:"type"`
-			Timestamp time.Time   `json:"timestamp"`
-			Data      interface{} `json:"data"`
+			Type      string    `json:"type"`
+			Timestamp time.Time `json:"timestamp"`
+			Data      any       `json:"data"`
 		}{
 			Type:      http.MsgTypeRegister,
 			Timestamp: time.Now(),
@@ -363,9 +364,9 @@ func TestAgentServer_Errors(t *testing.T) {
 		regData2.UUID = "agent-uuid-2"
 
 		err = conn2.WriteJSON(struct {
-			Type      string      `json:"type"`
-			Timestamp time.Time   `json:"timestamp"`
-			Data      interface{} `json:"data"`
+			Type      string    `json:"type"`
+			Timestamp time.Time `json:"timestamp"`
+			Data      any       `json:"data"`
 		}{
 			Type:      http.MsgTypeRegister,
 			Timestamp: time.Now(),

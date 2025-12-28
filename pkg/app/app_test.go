@@ -130,8 +130,7 @@ func TestStartPublicServerAndShutdown(t *testing.T) {
 	server, err := http.NewPublicServer(0, "test-token", p)
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Test Start
 	errChan := app.StartPublicServer(ctx, server)
@@ -162,8 +161,7 @@ func TestStartInternalServerAndShutdown(t *testing.T) {
 	// Use port 0 for random port
 	server := http.NewInternalServer(0, p)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Test Start
 	errChan := app.StartInternalServer(ctx, server)

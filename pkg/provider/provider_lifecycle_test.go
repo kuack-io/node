@@ -142,6 +142,7 @@ func TestProvider_NotifyNodeStatus(t *testing.T) {
 	require.NoError(t, err)
 
 	ch := make(chan *corev1.Node, 1)
+
 	p.NotifyNodeStatus(context.Background(), func(node *corev1.Node) {
 		ch <- node
 	})

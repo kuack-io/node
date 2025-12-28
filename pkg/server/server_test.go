@@ -24,8 +24,7 @@ func TestBaseHTTPServer_StartAndShutdown(t *testing.T) {
 	// Use port 0 for random port
 	srv := server.NewBaseHTTPServer("test-server", 0, handler, time.Second, time.Second)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	errChan := srv.Start(ctx)
 

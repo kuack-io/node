@@ -12,7 +12,7 @@ import (
 // AgentStream defines the interface for communicating with an agent.
 type AgentStream interface {
 	SetWriteDeadline(t time.Time) error
-	WriteJSON(v interface{}) error
+	WriteJSON(v any) error
 }
 
 // LogProvider defines the interface for retrieving container logs.

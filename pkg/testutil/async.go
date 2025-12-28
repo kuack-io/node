@@ -11,7 +11,7 @@ const defaultPollInterval = 10 * time.Millisecond
 
 // WaitForCondition blocks until condition returns true or the timeout elapses.
 // Tests should prefer this over time.Sleep to avoid racey assertions that depend on wall-clock delays.
-func WaitForCondition(t *testing.T, timeout time.Duration, condition func() bool, msgAndArgs ...interface{}) {
+func WaitForCondition(t *testing.T, timeout time.Duration, condition func() bool, msgAndArgs ...any) {
 	t.Helper()
 
 	require.Eventually(t, condition, timeout, defaultPollInterval, msgAndArgs...)

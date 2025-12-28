@@ -1,5 +1,8 @@
 .PHONY: build test coverage clean install uninstall fmt fmt-fix vet lint sec check dependencies package
 
+# exclude testutil package from tests
+PKGS := $(shell go list ./... | grep -v '/pkg/testutil$$')
+
 default: build
 
 # CGO_ENABLED=0:	build a pure go binary with no dependencies on external C libraries (like glibc)
@@ -11,7 +14,7 @@ build:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o kuack-node
 
 test:
-	go test -coverprofile=coverage.out ./...
+	go test -coverprofile=coverage.out $(PKGS)
 
 coverage:
 	go tool cover -html=coverage.out -o coverage.html

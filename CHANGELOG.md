@@ -1,3 +1,10 @@
+## [1.2.0](https://github.com/kuack-io/node/compare/1.1.0...1.2.0) (2025-12-28)
+
+### Features
+
+* full refactor, comprehensive tests ([ba077be](https://github.com/kuack-io/node/commit/ba077be693d8c3a60bf3a3baeabfeb86e3b2cce4))
+* refactoring ([a3b4547](https://github.com/kuack-io/node/commit/a3b45473a2aaaa797e5590ac3ebdaabbb17cab4e))
+
 ## [1.1.0](https://github.com/kuack-io/node/compare/1.0.8...1.1.0) (2025-12-24)
 
 ### Features

@@ -1,3 +1,9 @@
+## [1.2.2](https://github.com/kuack-io/node/compare/1.2.1...1.2.2) (2025-12-28)
+
+### Dependencies
+
+* **deps:** bump github.com/google/go-containerregistry ([a837482](https://github.com/kuack-io/node/commit/a83748203ad5b987edadb95957189fd70615f30e))
+
 ## [1.2.1](https://github.com/kuack-io/node/compare/1.2.0...1.2.1) (2025-12-28)
 
 ### Dependencies

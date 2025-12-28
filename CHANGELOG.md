@@ -1,3 +1,9 @@
+## [1.2.1](https://github.com/kuack-io/node/compare/1.2.0...1.2.1) (2025-12-28)
+
+### Dependencies
+
+* **deps:** bump docker/build-push-action from 5 to 6 ([b8d7eb9](https://github.com/kuack-io/node/commit/b8d7eb94fb5ed68909674e8feac20cf32195da69))
+
 ## [1.2.0](https://github.com/kuack-io/node/compare/1.1.0...1.2.0) (2025-12-28)
 
 ### Features

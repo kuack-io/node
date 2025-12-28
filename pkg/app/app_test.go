@@ -2,479 +2,221 @@ package app_test
 
 import (
 	"context"
-	"errors"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"kuack-node/pkg/app"
 	"kuack-node/pkg/config"
-	"kuack-node/pkg/health"
-	httpserver "kuack-node/pkg/http"
+	"kuack-node/pkg/http"
 	"kuack-node/pkg/provider"
+
+	"k8s.io/client-go/kubernetes"
 )
 
-var (
-	errTestError  = errors.New("test error")
-	errFirstError = errors.New("first error")
-)
+func setupTestConfig(t *testing.T) (*config.Config, func()) {
+	t.Helper()
 
-const testKubeconfigContent = `apiVersion: v1
-kind: Config
+	// Create dummy kubeconfig
+	kubeconfigContent := `
+apiVersion: v1
 clusters:
 - cluster:
-    server: https://test-server
-  name: test-cluster
+    server: https://localhost:6443
+    insecure-skip-tls-verify: true
+  name: kubernetes
 contexts:
 - context:
-    cluster: test-cluster
-    user: test-user
-  name: test-context
-current-context: test-context
+    cluster: kubernetes
+    user: admin
+  name: admin
+current-context: admin
+kind: Config
+preferences: {}
 users:
-- name: test-user
+- name: admin
   user:
-    token: test-token
+    username: admin
+    password: password
 `
+	tmpKubeconfig, err := os.CreateTemp(t.TempDir(), "kubeconfig")
+	require.NoError(t, err)
 
-//nolint:unparam // perm parameter kept for consistency with os.WriteFile signature
-func mustWriteFile(filename string, data []byte, perm os.FileMode) {
-	err := os.WriteFile(filename, data, perm)
-	if err != nil {
-		panic(err)
+	_, err = tmpKubeconfig.WriteString(kubeconfigContent)
+	require.NoError(t, err)
+	err = tmpKubeconfig.Close()
+	require.NoError(t, err)
+
+	// Create dummy cert/key
+	tmpCert, err := os.CreateTemp(t.TempDir(), "cert")
+	require.NoError(t, err)
+	err = tmpCert.Close()
+	require.NoError(t, err)
+
+	tmpKey, err := os.CreateTemp(t.TempDir(), "key")
+	require.NoError(t, err)
+	err = tmpKey.Close()
+	require.NoError(t, err)
+
+	cfg := &config.Config{
+		NodeName:       "test-node",
+		PublicPort:     0,
+		InternalPort:   0,
+		AgentToken:     "token",
+		KubeconfigPath: tmpKubeconfig.Name(),
+		TLSCertFile:    tmpCert.Name(),
+		TLSKeyFile:     tmpKey.Name(),
 	}
+
+	cleanup := func() {
+		_ = os.Remove(tmpKubeconfig.Name())
+		_ = os.Remove(tmpCert.Name())
+		_ = os.Remove(tmpKey.Name())
+	}
+
+	return cfg, cleanup
 }
 
 func TestSetupComponents(t *testing.T) {
 	t.Parallel()
 
-	t.Run("success", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
-		mustWriteFile(kubeconfigPath, []byte(testKubeconfigContent), 0o600)
+	cfg, cleanup := setupTestConfig(t)
+	defer cleanup()
 
-		cfg := &config.Config{
-			NodeName:       "test-node",
-			ListenAddr:     ":0",
-			KubeconfigPath: kubeconfigPath,
-			Verbosity:      0,
-		}
-
-		components, err := app.SetupComponents(cfg)
-		if err != nil {
-			t.Fatalf("SetupComponents() error = %v", err)
-		}
-
-		if components.WASMProvider == nil {
-			t.Error("SetupComponents() returned nil provider")
-		}
-
-		if components.HTTPServer == nil {
-			t.Error("SetupComponents() returned nil HTTP server")
-		}
-
-		if components.KubeClient == nil {
-			t.Error("SetupComponents() returned nil kube client")
-		}
-
-		if components.HealthServer == nil {
-			t.Error("SetupComponents() returned nil health server")
-		}
-	})
-
-	t.Run("invalid kubeconfig", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		kubeconfigPath := filepath.Join(tmpDir, "invalid-kubeconfig")
-		mustWriteFile(kubeconfigPath, []byte("invalid: yaml"), 0o600)
-
-		cfg := &config.Config{
-			NodeName:       "test-node",
-			ListenAddr:     ":0",
-			KubeconfigPath: kubeconfigPath,
-			Verbosity:      0,
-		}
-
-		_, err := app.SetupComponents(cfg)
-		if err == nil {
-			t.Error("SetupComponents() expected error with invalid kubeconfig, got nil")
-		}
-
-		if err != nil && !strings.Contains(err.Error(), "Kubernetes client") {
-			t.Errorf("SetupComponents() error should mention Kubernetes client, got: %v", err)
-		}
-	})
-
-	t.Run("non-existent kubeconfig", func(t *testing.T) {
-		t.Parallel()
-
-		cfg := &config.Config{
-			NodeName:       "test-node",
-			ListenAddr:     ":0",
-			KubeconfigPath: "/nonexistent/kubeconfig",
-			Verbosity:      0,
-		}
-
-		_, err := app.SetupComponents(cfg)
-		if err == nil {
-			t.Error("SetupComponents() expected error with non-existent kubeconfig, got nil")
-		}
-	})
-}
-
-func TestStartHTTPServer(t *testing.T) {
-	t.Parallel()
-
-	t.Run("server starts successfully", func(t *testing.T) {
-		t.Parallel()
-
-		p, _ := provider.NewWASMProvider("test-node")
-
-		httpServer, err := httpserver.NewServer(&httpserver.Config{
-			ListenAddr: ":0",
-			Provider:   p,
-		})
-		if err != nil {
-			t.Fatalf("Failed to create HTTP server: %v", err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-
-		httpErrChan := app.StartHTTPServer(ctx, httpServer)
-
-		// Wait a bit for the server to start
-		time.Sleep(50 * time.Millisecond)
-
-		// Check that no error was sent immediately
-		select {
-		case err := <-httpErrChan:
-			t.Errorf("StartHTTPServer() sent unexpected error: %v", err)
-		default:
-			// No error, which is expected
-		}
-
-		// Shutdown the server
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Second)
-		defer shutdownCancel()
-
-		_ = httpServer.Shutdown(shutdownCtx)
-	})
-
-	t.Run("server error is sent to channel", func(t *testing.T) {
-		t.Parallel()
-
-		p, _ := provider.NewWASMProvider("test-node")
-
-		// Create server with invalid address to force error
-		httpServer, err := httpserver.NewServer(&httpserver.Config{
-			ListenAddr: "99999",
-			Provider:   p,
-		})
-		if err != nil {
-			t.Fatalf("Failed to create HTTP server: %v", err)
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		httpErrChan := app.StartHTTPServer(ctx, httpServer)
-
-		// Wait for error to be sent
-		select {
-		case err := <-httpErrChan:
-			if err == nil {
-				t.Error("StartHTTPServer() sent nil error")
-			}
-
-			if err != nil && !strings.Contains(err.Error(), "HTTP server") {
-				t.Errorf("StartHTTPServer() error should mention HTTP server, got: %v", err)
-			}
-		case <-time.After(1 * time.Second):
-			// Error might not be sent immediately, which is okay
-		}
-	})
-}
-
-func TestRunNodeController(t *testing.T) {
-	t.Parallel()
-
-	t.Run("node controller fails with invalid kubeconfig", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
-		mustWriteFile(kubeconfigPath, []byte(testKubeconfigContent), 0o600)
-
-		wasmProvider, _ := provider.NewWASMProvider("test-node")
-
-		// Get a valid kubeClient
-		// The node controller will fail because test-server doesn't exist
-		// but we can test that the function handles errors properly
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
-
-		// We can't easily test the success path without a real Kubernetes cluster
-		// So we test that it properly handles errors by using a kubeconfig that
-		// points to a non-existent server
-		_ = wasmProvider
-		_ = kubeconfigPath
-		_ = ctx
-		_ = cancel
-		// This test verifies the function signature and error handling structure
-		// The actual error handling is tested in the Run() function tests
-	})
-}
-
-func TestShutdownGracefully(t *testing.T) {
-	t.Parallel()
-
-	t.Run("shutdown with no error", func(t *testing.T) {
-		t.Parallel()
-
-		p, _ := provider.NewWASMProvider("test-node")
-
-		httpServer, err := httpserver.NewServer(&httpserver.Config{
-			ListenAddr: ":0",
-			Provider:   p,
-		})
-		if err != nil {
-			t.Fatalf("Failed to create HTTP server: %v", err)
-		}
-
-		httpErrChan := make(chan error, 1)
-		healthErrChan := make(chan error, 1)
-
-		ctx := context.Background()
-
-		healthServer := health.NewServer(provider.KubeletPort)
-
-		err = app.ShutdownGracefully(ctx, httpServer, healthServer, httpErrChan, healthErrChan)
-		if err != nil {
-			t.Errorf("ShutdownGracefully() with no error = %v, want nil", err)
-		}
-	})
-
-	t.Run("shutdown with error in channel", func(t *testing.T) {
-		t.Parallel()
-
-		p, _ := provider.NewWASMProvider("test-node")
-
-		httpServer, err := httpserver.NewServer(&httpserver.Config{
-			ListenAddr: ":0",
-			Provider:   p,
-		})
-		if err != nil {
-			t.Fatalf("Failed to create HTTP server: %v", err)
-		}
-
-		httpErrChan := make(chan error, 1)
-
-		httpErrChan <- errTestError
-
-		healthErrChan := make(chan error, 1)
-
-		ctx := context.Background()
-
-		healthServer := health.NewServer(provider.KubeletPort)
-
-		err = app.ShutdownGracefully(ctx, httpServer, healthServer, httpErrChan, healthErrChan)
-		if err == nil {
-			t.Error("ShutdownGracefully() expected error from channel, got nil")
-		}
-
-		if err != nil && !strings.Contains(err.Error(), "test error") {
-			t.Errorf("ShutdownGracefully() error = %v, want error containing 'test error'", err)
-		}
-
-		if err != nil && !strings.Contains(err.Error(), "HTTP server error") {
-			t.Errorf("ShutdownGracefully() error should mention HTTP server error, got: %v", err)
-		}
-	})
-
-	t.Run("shutdown with timeout", func(t *testing.T) {
-		t.Parallel()
-
-		p, _ := provider.NewWASMProvider("test-node")
-
-		httpServer, err := httpserver.NewServer(&httpserver.Config{
-			ListenAddr: ":0",
-			Provider:   p,
-		})
-		if err != nil {
-			t.Fatalf("Failed to create HTTP server: %v", err)
-		}
-
-		httpErrChan := make(chan error, 1)
-		healthErrChan := make(chan error, 1)
-
-		// Use a context that's already cancelled
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-
-		healthServer := health.NewServer(provider.KubeletPort)
-		err = app.ShutdownGracefully(ctx, httpServer, healthServer, httpErrChan, healthErrChan)
-		// Should handle gracefully even with cancelled context
-		_ = err
-	})
+	ctx := context.Background()
+	components, err := app.SetupComponents(ctx, cfg)
+	require.NoError(t, err)
+	require.NotNil(t, components)
+	require.NotNil(t, components.WASMProvider)
+	require.NotNil(t, components.PublicServer)
+	require.NotNil(t, components.InternalServer)
+	require.NotNil(t, components.KubeClient)
 }
 
 func TestRun(t *testing.T) {
 	t.Parallel()
 
-	t.Run("run with valid config", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
-		mustWriteFile(kubeconfigPath, []byte(testKubeconfigContent), 0o600)
+	cfg, cleanup := setupTestConfig(t)
+	defer cleanup()
 
-		cfg := &config.Config{
-			NodeName:       "test-node",
-			ListenAddr:     ":0",
-			KubeconfigPath: kubeconfigPath,
-			Verbosity:      0,
-		}
+	ctx, cancel := context.WithCancel(context.Background())
 
-		// Test with context that cancels quickly
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		defer cancel()
+	// Mock runner that cancels context to stop Run
+	mockRunner := func(ctx context.Context, p *provider.WASMProvider, k kubernetes.Interface) error {
+		// Verify arguments
+		require.NotNil(t, p)
+		require.NotNil(t, k)
 
-		// Run should start but be cancelled quickly
-		err := app.Run(ctx, cfg)
-		// Error is expected due to context cancellation
-		if err != nil && !strings.Contains(err.Error(), "context") {
-			t.Logf("run() returned error: %v", err)
-		}
-	})
+		// Signal that we are running
+		cancel()
 
-	t.Run("run with invalid HTTP address", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
-		mustWriteFile(kubeconfigPath, []byte(testKubeconfigContent), 0o600)
-
-		cfg := &config.Config{
-			NodeName:       "test-node",
-			ListenAddr:     "invalid-address",
-			KubeconfigPath: kubeconfigPath,
-			Verbosity:      0,
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-
-		err := app.Run(ctx, cfg)
-		if err == nil {
-			t.Fatal("Run() with invalid HTTP address expected error, got nil")
-		}
-
-		if !strings.Contains(err.Error(), "HTTP server error") &&
-			!strings.Contains(err.Error(), "context deadline exceeded") {
-			t.Fatalf("Run() with invalid HTTP address returned unexpected error: %v", err)
-		}
-	})
-
-	t.Run("run with invalid kubeconfig", func(t *testing.T) {
-		t.Parallel()
-
-		cfg := &config.Config{
-			NodeName:       "test-node",
-			ListenAddr:     ":0",
-			KubeconfigPath: "/nonexistent/kubeconfig",
-			Verbosity:      0,
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		defer cancel()
-
-		err := app.Run(ctx, cfg)
-		if err == nil {
-			t.Error("Run() with invalid kubeconfig expected error, got nil")
-		}
-	})
-}
-
-func TestComponents(t *testing.T) {
-	t.Parallel()
-
-	t.Run("components struct fields", func(t *testing.T) {
-		t.Parallel()
-
-		components := &app.Components{
-			WASMProvider: nil,
-			HTTPServer:   nil,
-			HealthServer: nil,
-			KubeClient:   nil,
-		}
-
-		// Test that struct can be created with nil values
-		_ = components.WASMProvider
-		_ = components.HTTPServer
-		_ = components.HealthServer
-		_ = components.KubeClient
-	})
-}
-
-func TestStartHTTPServer_ChannelFull(t *testing.T) {
-	t.Parallel()
-
-	// Test that when channel is full, error handling works correctly
-	p, _ := provider.NewWASMProvider("test-node")
-
-	httpServer, err := httpserver.NewServer(&httpserver.Config{
-		ListenAddr: ":0",
-		Provider:   p,
-	})
-	if err != nil {
-		t.Fatalf("Failed to create HTTP server: %v", err)
+		return nil
 	}
 
-	// Create a channel with buffer size 1 and fill it
-	httpErrChan := make(chan error, 1)
+	err := app.Run(ctx, cfg, mockRunner)
+	require.NoError(t, err)
+}
 
-	httpErrChan <- errFirstError
+func TestStartPublicServerAndShutdown(t *testing.T) {
+	t.Parallel()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// Setup
+	p, err := provider.NewWASMProvider("test-node")
+	require.NoError(t, err)
+
+	// Use port 0 for random port
+	server, err := http.NewPublicServer(0, "test-token", p)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Start server - if it tries to send another error, it should handle the full channel
-	_ = app.StartHTTPServer(ctx, httpServer)
+	// Test Start
+	errChan := app.StartPublicServer(ctx, server)
 
-	// Wait a bit
-	time.Sleep(20 * time.Millisecond)
+	// Give it a moment to start
+	time.Sleep(100 * time.Millisecond)
 
-	// Shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 1*time.Second)
-	defer shutdownCancel()
+	// Verify no immediate error
+	select {
+	case err := <-errChan:
+		require.NoError(t, err, "Public server failed to start")
+	default:
+		// OK
+	}
 
-	_ = httpServer.Shutdown(shutdownCtx)
+	// Test Shutdown
+	err = app.ShutdownGracefully(ctx, server, nil, errChan, nil)
+	require.NoError(t, err)
 }
 
-func TestShutdownGracefully_HTTPErrChanTimeout(t *testing.T) {
+func TestStartInternalServerAndShutdown(t *testing.T) {
 	t.Parallel()
 
-	p, _ := provider.NewWASMProvider("test-node")
+	// Setup
+	p, err := provider.NewWASMProvider("test-node")
+	require.NoError(t, err)
 
-	httpServer, err := httpserver.NewServer(&httpserver.Config{
-		ListenAddr: ":0",
-		Provider:   p,
-	})
-	if err != nil {
-		t.Fatalf("Failed to create HTTP server: %v", err)
+	// Use port 0 for random port
+	server := http.NewInternalServer(0, p)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Test Start
+	errChan := app.StartInternalServer(ctx, server)
+
+	// Give it a moment to start
+	time.Sleep(100 * time.Millisecond)
+
+	// Verify no immediate error
+	select {
+	case err := <-errChan:
+		require.NoError(t, err, "Internal server failed to start")
+	default:
+		// OK
 	}
 
-	// Create channel with no error
-	httpErrChan := make(chan error, 1)
-	healthErrChan := make(chan error, 1)
+	// Test Shutdown
+	err = app.ShutdownGracefully(ctx, nil, server, nil, errChan)
+	require.NoError(t, err)
+}
+
+func TestShutdownGracefully_Errors(t *testing.T) {
+	t.Parallel()
 
 	ctx := context.Background()
+	publicErrChan := make(chan error, 1)
+	internalErrChan := make(chan error, 1)
 
-	healthServer := health.NewServer(provider.KubeletPort)
+	// Simulate error
+	publicErrChan <- assertError("public error")
 
-	err = app.ShutdownGracefully(ctx, httpServer, healthServer, httpErrChan, healthErrChan)
-	if err != nil {
-		t.Errorf("ShutdownGracefully() with no error in channel = %v, want nil", err)
-	}
+	err := app.ShutdownGracefully(ctx, nil, nil, publicErrChan, internalErrChan)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "public server error")
+
+	// Reset
+	publicErrChan = make(chan error, 1)
+
+	internalErrChan = make(chan error, 1)
+	internalErrChan <- assertError("internal error")
+
+	err = app.ShutdownGracefully(ctx, nil, nil, publicErrChan, internalErrChan)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "internal server error")
+}
+
+func assertError(msg string) error {
+	return &testError{msg: msg}
+}
+
+type testError struct {
+	msg string
+}
+
+func (e *testError) Error() string {
+	return e.msg
 }

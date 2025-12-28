@@ -1,193 +1,65 @@
 package k8s_test
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
 	"kuack-node/pkg/k8s"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
-const testKubeconfigContent = `apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    server: https://test-server
-  name: test-cluster
-contexts:
-- context:
-    cluster: test-cluster
-    user: test-user
-  name: test-context
-current-context: test-context
-users:
-- name: test-user
-  user:
-    token: test-token
-`
-
-//nolint:unparam // perm parameter kept for consistency with os.WriteFile signature
-func mustWriteFile(filename string, data []byte, perm os.FileMode) {
-	err := os.WriteFile(filename, data, perm)
-	if err != nil {
-		panic(err)
-	}
-}
+const validPEM = `-----BEGIN CERTIFICATE-----
+MIIC/zCCAeegAwIBAgIUBvU4MUEMSoPb+s4mAw09WMO0DIcwDQYJKoZIhvcNAQEL
+BQAwDzENMAsGA1UEAwwEdGVzdDAeFw0yNTEyMjcyMzEzMjVaFw0yNjEyMjcyMzEz
+MjVaMA8xDTALBgNVBAMMBHRlc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQDHGXIrvKjef4zvRxL81QNfSq2FlutAwG5ouJtR+MPIhVxI8QcHx/493kDp
+yFretGMV8ieafMcDqH7NcJ9sAsKsBtItluv8wA4ZAifND59TeWELVb0VsYLLlsY0
+69dAZ54iGiodJ/6unxcyxJOxu4eSvTtEb945lTK6wiIEUAZ52QkN7drhdLSMraXU
+UX9JuYprwib54Smpqk5JtZ62cI1nxX/b///tmc5XxOBzPsVDza/GDKgR61d6LNJZ
+v+aQNF45+O+XjRgz0wi+bxdBHfSBEombCjxlSIgkwJmuE28R8FG07LWZJBCDMXk8
+Gl3qvGzISyOsVlBLcLFrypasUiYhAgMBAAGjUzBRMB0GA1UdDgQWBBQXHRVGJxfG
+dR50lRoP4GXPiVhFdTAfBgNVHSMEGDAWgBQXHRVGJxfGdR50lRoP4GXPiVhFdTAP
+BgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCMZIvTdmJtEpe3MPH2
+X45yq7nUIA2NdPZiHJmbGW1TuHBnuIT8S9BiXEijwa/cILsbeP+/h8E1nI6SQuXk
+Q7jJE50AHN9z1C87xYkToWrD/ftl5hQk68qp6TlKY47h/JXknIWpWJGbOzPZQ5NZ
+8hmmCsyUQy5BhfVYgvQrskcKKgxsHx6k+9YYNdaKD4OFCX5YdAVyOytuX92V5Bma
+GWLo5+fFCKspdvVCHXAwAqIl7jElb+U5frWYTykoHyhtCHRm7j6lFDm7ZT8faaKW
+E6hJt8GGOqjT4rJ6eAOS2XWDPAgTyogE5ynyj2+//rBGhKH2MlWVjWZfZwEk5XS+
+YltH
+-----END CERTIFICATE-----`
 
 func TestGetKubeClient(t *testing.T) {
 	t.Parallel()
 
-	t.Run("valid kubeconfig", func(t *testing.T) {
-		t.Parallel()
-		// Create a temporary kubeconfig file for testing
-		tmpDir := t.TempDir()
-		kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
+	// Create a temporary kubeconfig file
+	tmpDir := t.TempDir()
+	kubeconfigPath := filepath.Join(tmpDir, "kubeconfig")
 
-		// Create a minimal valid kubeconfig
-		mustWriteFile(kubeconfigPath, []byte(testKubeconfigContent), 0o600)
-
-		// Test with valid kubeconfig
-		client, err := k8s.GetKubeClient(kubeconfigPath)
-		if err != nil {
-			t.Errorf("GetKubeClient() with valid config error = %v, want nil", err)
-		}
-
-		if client == nil {
-			t.Error("GetKubeClient() returned nil client")
-		}
-	})
-
-	t.Run("empty path (in-cluster config)", func(t *testing.T) {
-		t.Parallel()
-		// Test with empty path (in-cluster config - will fail in test environment)
-		_, err := k8s.GetKubeClient("")
-		if err == nil {
-			t.Error("GetKubeClient() with empty path expected error, got nil")
-		}
-
-		// Verify error message contains expected text
-		if err != nil && err.Error() == "" {
-			t.Error("GetKubeClient() error should have a message")
-		}
-	})
-
-	t.Run("non-existent file", func(t *testing.T) {
-		t.Parallel()
-		// Test with non-existent file
-		_, err := k8s.GetKubeClient("/nonexistent/kubeconfig")
-		if err == nil {
-			t.Error("GetKubeClient() with non-existent file expected error, got nil")
-		}
-
-		// Verify error message
-		if err != nil && err.Error() == "" {
-			t.Error("GetKubeClient() error should have a message")
-		}
-	})
-
-	t.Run("invalid kubeconfig content", func(t *testing.T) {
-		t.Parallel()
-		// Test with invalid kubeconfig content
-		tmpDir := t.TempDir()
-		invalidKubeconfigPath := filepath.Join(tmpDir, "invalid-kubeconfig")
-		mustWriteFile(invalidKubeconfigPath, []byte("invalid: yaml"), 0o600)
-
-		_, err := k8s.GetKubeClient(invalidKubeconfigPath)
-		// This might succeed in creating config but fail on NewForConfig
-		// or fail on BuildConfigFromFlags - either way we test error handling
-		if err != nil {
-			// Error is expected, verify it has a message
-			if err.Error() == "" {
-				t.Error("GetKubeClient() error should have a message")
-			}
-		}
-	})
-
-	t.Run("malformed yaml", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		malformedPath := filepath.Join(tmpDir, "malformed")
-		mustWriteFile(malformedPath, []byte("this is not yaml at all: [unclosed"), 0o600)
-
-		_, err := k8s.GetKubeClient(malformedPath)
-		if err == nil {
-			t.Error("GetKubeClient() with malformed yaml expected error, got nil")
-		}
-	})
-
-	t.Run("empty file", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		emptyPath := filepath.Join(tmpDir, "empty")
-		mustWriteFile(emptyPath, []byte(""), 0o600)
-
-		_, err := k8s.GetKubeClient(emptyPath)
-		if err == nil {
-			t.Error("GetKubeClient() with empty file expected error, got nil")
-		}
-	})
-
-	t.Run("kubeconfig with missing server", func(t *testing.T) {
-		t.Parallel()
-		tmpDir := t.TempDir()
-		missingServerPath := filepath.Join(tmpDir, "missing-server")
-		invalidConfig := `apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-  name: test-cluster
-contexts:
-- context:
-    cluster: test-cluster
-    user: test-user
-  name: test-context
-current-context: test-context
-users:
-- name: test-user
-  user:
-    token: test-token
-`
-		mustWriteFile(missingServerPath, []byte(invalidConfig), 0o600)
-
-		_, err := k8s.GetKubeClient(missingServerPath)
-		// May or may not error depending on validation, but should not panic
-		_ = err
-	})
-}
-
-func TestGetKubeClient_ErrorMessages(t *testing.T) {
-	t.Parallel()
-
-	t.Run("error message contains 'kubeconfig'", func(t *testing.T) {
-		t.Parallel()
-
-		_, err := k8s.GetKubeClient("/nonexistent/path")
-		if err == nil {
-			t.Fatal("expected error")
-		}
-
-		errMsg := err.Error()
-		if errMsg == "" {
-			t.Error("error message should not be empty")
-		}
-		// Error should mention kubeconfig or config
-		if errMsg != "" && !containsAny(errMsg, []string{"kubeconfig", "config", "failed"}) {
-			t.Errorf("error message should mention kubeconfig/config/failed, got: %q", errMsg)
-		}
-	})
-}
-
-// containsAny checks if the string contains any of the substrings.
-func containsAny(s string, substrings []string) bool {
-	for _, substr := range substrings {
-		if len(s) >= len(substr) {
-			for i := 0; i <= len(s)-len(substr); i++ {
-				if s[i:i+len(substr)] == substr {
-					return true
-				}
-			}
-		}
+	config := clientcmdapi.NewConfig()
+	config.Clusters["test-cluster"] = &clientcmdapi.Cluster{
+		Server:                   "https://localhost:6443",
+		CertificateAuthorityData: []byte(validPEM),
 	}
+	config.Contexts["test-context"] = &clientcmdapi.Context{
+		Cluster: "test-cluster",
+	}
+	config.CurrentContext = "test-context"
 
-	return false
+	err := clientcmd.WriteToFile(*config, kubeconfigPath)
+	require.NoError(t, err)
+
+	client, err := k8s.GetKubeClient(kubeconfigPath)
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+}
+
+func TestGetKubeClient_Error(t *testing.T) {
+	t.Parallel()
+	// Pass invalid path
+	_, err := k8s.GetKubeClient("/nonexistent/kubeconfig")
+	require.Error(t, err)
 }

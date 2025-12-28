@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"kuack-node/pkg/config"
-	"kuack-node/pkg/health"
 	httpserver "kuack-node/pkg/http"
 	"kuack-node/pkg/k8s"
 	"kuack-node/pkg/provider"
+	tlsutil "kuack-node/pkg/tls"
 
 	"github.com/virtual-kubelet/virtual-kubelet/node"
 	corev1 "k8s.io/api/core/v1"
@@ -31,94 +32,149 @@ var (
 
 const podControllerWorkers = 5
 
+// allow overriding external dependencies in tests.
+//
+//nolint:gochecknoglobals // package-level seams let tests stub kube clients, TLS, and HTTP servers without plumbing args everywhere
+var (
+	newWASMProviderFunc   = provider.NewWASMProvider
+	newPublicServerFunc   = httpserver.NewPublicServer
+	newInternalServerFunc = httpserver.NewInternalServer
+	getKubeClientFunc     = func(path string) (kubernetes.Interface, error) {
+		return k8s.GetKubeClient(path)
+	}
+	requestCertificateFunc     = tlsutil.RequestCertificateFromK8s
+	generateSelfSignedCertFunc = tlsutil.GenerateSelfSignedCert
+	getEnvFunc                 = os.Getenv
+	publicServerStartFunc      = func(server *httpserver.PublicServer, ctx context.Context) <-chan error {
+		return server.Start(ctx)
+	}
+	internalServerStartFunc = func(server *httpserver.InternalServer, ctx context.Context) <-chan error {
+		return server.Start(ctx)
+	}
+)
+
 // Components holds the main application components.
 type Components struct {
-	WASMProvider *provider.WASMProvider
-	HTTPServer   *httpserver.Server
-	HealthServer *health.Server
-	KubeClient   *kubernetes.Clientset
+	WASMProvider   *provider.WASMProvider
+	PublicServer   *httpserver.PublicServer
+	InternalServer *httpserver.InternalServer
+	KubeClient     kubernetes.Interface
 }
 
 // SetupComponents initializes and returns the main application components.
-func SetupComponents(cfg *config.Config) (*Components, error) {
+func SetupComponents(ctx context.Context, cfg *config.Config) (*Components, error) {
 	// Create the WASM provider
-	wasmProvider, err := provider.NewWASMProvider(cfg.NodeName)
+	wasmProvider, err := newWASMProviderFunc(cfg.NodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WASM provider: %w", err)
 	}
 
-	// Create HTTP server for agent connections
-	httpServer, err := httpserver.NewServer(&httpserver.Config{
-		ListenAddr: cfg.ListenAddr,
-		Provider:   wasmProvider,
-	})
+	// Create Public Server (Agent + Registry)
+	publicServer, err := newPublicServerFunc(cfg.PublicPort, cfg.AgentToken, wasmProvider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP server: %w", err)
+		return nil, fmt.Errorf("failed to create Public server: %w", err)
 	}
 
-	// Get Kubernetes client
-	kubeClient, err := k8s.GetKubeClient(cfg.KubeconfigPath)
+	// Get Kubernetes client first (needed for CSR)
+	kubeClient, err := getKubeClientFunc(cfg.KubeconfigPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Kubernetes client: %w", err)
 	}
 
-	// Create health server for readiness/liveness probes
-	healthServer := health.NewServer(provider.KubeletPort)
+	// Request TLS certificates from Kubernetes CSR API if not provided
+	certFile := cfg.TLSCertFile
+	keyFile := cfg.TLSKeyFile
+
+	if certFile == "" || keyFile == "" {
+		// Use /tmp for certificate storage
+		certFile = "/tmp/kuack-kubelet-serving.crt"
+		keyFile = "/tmp/kuack-kubelet-serving.key"
+
+		// Get the node IP (POD_IP environment variable)
+		nodeIP := getEnvFunc("POD_IP")
+		if nodeIP == "" {
+			nodeIP = "127.0.0.1" // Fallback to localhost
+		}
+
+		// Always request a new certificate on startup to ensure it matches the current Pod IP
+		// This is important in environments where Pod IPs change frequently (like k3d/devspace)
+
+		// Request certificate from Kubernetes CSR API
+		err = requestCertificateFunc(ctx, kubeClient, cfg.NodeName, nodeIP, certFile, keyFile)
+		if err != nil {
+			klog.Warningf("Failed to request certificate from Kubernetes CSR API: %v. Falling back to self-signed certificate.", err)
+
+			// Fallback to self-signed certificate
+			err = generateSelfSignedCertFunc(nodeIP, certFile, keyFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate self-signed TLS certificate: %w", err)
+			}
+		}
+	}
+
+	// Create Internal Server (Logs + Health) with TLS
+	internalServer := newInternalServerFunc(cfg.InternalPort, wasmProvider)
+	internalServer.WithTLS(certFile, keyFile)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Kubernetes client: %w", err)
+	}
 
 	return &Components{
-		WASMProvider: wasmProvider,
-		HTTPServer:   httpServer,
-		HealthServer: healthServer,
-		KubeClient:   kubeClient,
+		WASMProvider:   wasmProvider,
+		PublicServer:   publicServer,
+		InternalServer: internalServer,
+		KubeClient:     kubeClient,
 	}, nil
 }
 
-// StartHTTPServer starts the HTTP server in a goroutine and returns an error channel.
-func StartHTTPServer(ctx context.Context, httpServer *httpserver.Server) <-chan error {
-	httpErrChan := make(chan error, 1)
+// StartPublicServer starts the Public server in a goroutine and returns an error channel.
+func StartPublicServer(ctx context.Context, server *httpserver.PublicServer) <-chan error {
+	errChan := make(chan error, 1)
 
 	go func() {
-		err := httpServer.Start(ctx)
-		if err != nil {
-			select {
-			case httpErrChan <- fmt.Errorf("HTTP server failed: %w", err):
-			default:
-				// Channel full, error already queued
-			}
-		}
-	}()
-
-	return httpErrChan
-}
-
-// StartHealthServer starts the health server in a goroutine and returns an error channel.
-func StartHealthServer(ctx context.Context, healthServer *health.Server) <-chan error {
-	healthErrChan := make(chan error, 1)
-
-	go func() {
-		errChan := healthServer.Start(ctx)
+		serverErrChan := publicServerStartFunc(server, ctx)
 		select {
-		case err := <-errChan:
+		case err := <-serverErrChan:
 			if err != nil {
 				select {
-				case healthErrChan <- fmt.Errorf("health server failed: %w", err):
+				case errChan <- fmt.Errorf("public server failed: %w", err):
 				default:
-					// Channel full, error already queued
 				}
 			}
 		case <-ctx.Done():
-			// Context cancelled, server shutting down
 		}
 	}()
 
-	return healthErrChan
+	return errChan
+}
+
+// StartInternalServer starts the Internal server in a goroutine and returns an error channel.
+func StartInternalServer(ctx context.Context, server *httpserver.InternalServer) <-chan error {
+	errChan := make(chan error, 1)
+
+	go func() {
+		serverErrChan := internalServerStartFunc(server, ctx)
+		select {
+		case err := <-serverErrChan:
+			if err != nil {
+				select {
+				case errChan <- fmt.Errorf("internal server failed: %w", err):
+				default:
+				}
+			}
+		case <-ctx.Done():
+		}
+	}()
+
+	return errChan
 }
 
 // RunNodeController creates and runs the virtual kubelet node controller.
 func RunNodeController(
 	ctx context.Context,
 	wasmProvider *provider.WASMProvider,
-	kubeClient *kubernetes.Clientset,
+	kubeClient kubernetes.Interface,
 ) error {
 	// Create a pod controller to handle pod lifecycle events
 	// We need to watch pods assigned to this node
@@ -221,51 +277,50 @@ func RunNodeController(
 	return nil
 }
 
-// ShutdownGracefully performs graceful shutdown of the HTTP and health servers.
+// ShutdownGracefully performs graceful shutdown of the servers.
 func ShutdownGracefully(
 	ctx context.Context,
-	httpServer *httpserver.Server,
-	healthServer *health.Server,
-	httpErrChan <-chan error,
-	healthErrChan <-chan error,
+	publicServer *httpserver.PublicServer,
+	internalServer *httpserver.InternalServer,
+	publicErrChan <-chan error,
+	internalErrChan <-chan error,
 ) error {
 	klog.Info("Shutting down gracefully...")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, config.ShutdownTimeout)
 	defer shutdownCancel()
 
-	// Shutdown health server first (it's less critical)
-	if healthServer != nil {
-		err := healthServer.Shutdown(shutdownCtx)
+	// Shutdown Internal server
+	if internalServer != nil {
+		err := internalServer.Shutdown(shutdownCtx)
 		if err != nil {
-			klog.Errorf("Error during health server shutdown: %v", err)
+			klog.Errorf("Error during Internal server shutdown: %v", err)
 		}
 	}
 
-	// Shutdown HTTP server
-	err := httpServer.Shutdown(shutdownCtx)
-	if err != nil {
-		klog.Errorf("Error during HTTP server shutdown: %v", err)
+	// Shutdown Public server
+	if publicServer != nil {
+		err := publicServer.Shutdown(shutdownCtx)
+		if err != nil {
+			klog.Errorf("Error during Public server shutdown: %v", err)
+		}
 	}
 
-	// Check for server errors (must check before returning)
-	// Check with a short timeout to avoid blocking, but ensure we check the channels
+	// Check for server errors
 	select {
-	case err := <-httpErrChan:
+	case err := <-publicErrChan:
 		if err != nil {
-			return fmt.Errorf("HTTP server error: %w", err)
+			return fmt.Errorf("public server error: %w", err)
 		}
 	case <-time.After(config.HttpErrChanTimeout):
-		// No error in httpErrChan within timeout, continue
 	}
 
 	select {
-	case err := <-healthErrChan:
+	case err := <-internalErrChan:
 		if err != nil {
-			return fmt.Errorf("health server error: %w", err)
+			return fmt.Errorf("internal server error: %w", err)
 		}
 	case <-time.After(config.HttpErrChanTimeout):
-		// No error in healthErrChan within timeout, continue
 	}
 
 	klog.Info("Shutdown complete")
@@ -273,30 +328,36 @@ func ShutdownGracefully(
 	return nil
 }
 
+// NodeControllerRunner is a function that runs the node controller.
+type NodeControllerRunner func(context.Context, *provider.WASMProvider, kubernetes.Interface) error
+
 // Run is the main application logic, extracted for testing.
-func Run(ctx context.Context, cfg *config.Config) error {
+func Run(ctx context.Context, cfg *config.Config, nodeRunner NodeControllerRunner) error {
 	// Initialize klog
 	config.InitializeKlog(cfg.Verbosity)
 
 	klog.Infof("Starting Virtual Kubelet for WASM workloads")
 	klog.Infof("Node name: %s", cfg.NodeName)
-	klog.Infof("HTTP listen address: %s", cfg.ListenAddr)
 	klog.Infof("Klog verbosity: %d", cfg.Verbosity)
 
 	// Setup components
-	components, err := SetupComponents(cfg)
+	components, err := SetupComponents(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	// Start health server (for readiness/liveness probes)
-	healthErrChan := StartHealthServer(ctx, components.HealthServer)
+	// Start Public Server
+	publicErrChan := StartPublicServer(ctx, components.PublicServer)
 
-	// Start HTTP server
-	httpErrChan := StartHTTPServer(ctx, components.HTTPServer)
+	// Start Internal Server
+	internalErrChan := StartInternalServer(ctx, components.InternalServer)
 
 	// Run node controller
-	err = RunNodeController(ctx, components.WASMProvider, components.KubeClient)
+	if nodeRunner == nil {
+		nodeRunner = RunNodeController
+	}
+
+	err = nodeRunner(ctx, components.WASMProvider, components.KubeClient)
 	if err != nil {
 		return err
 	}
@@ -304,9 +365,9 @@ func Run(ctx context.Context, cfg *config.Config) error {
 	// Graceful shutdown
 	return ShutdownGracefully(
 		ctx,
-		components.HTTPServer,
-		components.HealthServer,
-		httpErrChan,
-		healthErrChan,
+		components.PublicServer,
+		components.InternalServer,
+		publicErrChan,
+		internalErrChan,
 	)
 }

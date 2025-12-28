@@ -1,4 +1,4 @@
-package http
+package registry
 
 import (
 	"archive/tar"
@@ -27,6 +27,8 @@ const (
 	allowedCORSMethods  = "GET, OPTIONS"
 	corsAllowOriginName = "Access-Control-Allow-Origin"
 	variantSplitParts   = 2
+	// logVerboseLevel is the klog verbosity level for verbose debug logs.
+	logVerboseLevel = 4
 )
 
 var (
@@ -38,14 +40,11 @@ var (
 	errFileTooLarge         = errors.New("file too large")
 )
 
-var (
-	remoteImageFunc = remote.Image //nolint:gochecknoglobals // overridden in tests to avoid remote access
-)
-
-// RegistryProxy streams files from OCI images to the agent via HTTP with CORS.
-type RegistryProxy struct {
+// Proxy streams files from OCI images to the agent via HTTP with CORS.
+type Proxy struct {
 	cache         sync.Map
 	fetchArtifact func(ctx context.Context, ref, artifactPath string, platform *v1.Platform) ([]byte, error)
+	imageFetcher  func(ref name.Reference, options ...remote.Option) (v1.Image, error)
 }
 
 type cachedArtifact struct {
@@ -54,71 +53,22 @@ type cachedArtifact struct {
 	cachedAt    time.Time
 }
 
-// NewRegistryProxy creates a registry proxy instance.
-func NewRegistryProxy() *RegistryProxy {
-	return &RegistryProxy{
-		fetchArtifact: fetchArtifactFromRegistry,
+// NewProxy creates a new registry proxy instance.
+func NewProxy() *Proxy {
+	p := &Proxy{
+		imageFetcher: remote.Image,
 	}
-}
+	p.fetchArtifact = p.fetchArtifactFromRegistry
 
-func fetchArtifactFromRegistry(
-	ctx context.Context,
-	ref string,
-	artifactPath string,
-	platform *v1.Platform,
-) ([]byte, error) {
-	klog.Infof("[Registry] Fetching artifact: ref=%s, path=%s, platform=%v", ref, artifactPath, platform)
-
-	parsed, err := name.ParseReference(ref, name.WithDefaultTag("latest"))
-	if err != nil {
-		klog.Errorf("[Registry] Failed to parse reference %s: %v", ref, err)
-
-		return nil, err
-	}
-
-	klog.Infof("[Registry] Parsed reference: %s", parsed.String())
-
-	opts := []remote.Option{
-		remote.WithContext(ctx),
-		remote.WithUserAgent(registryUserAgent),
-	}
-
-	if platform != nil {
-		klog.Infof("[Registry] Using platform: %s/%s", platform.OS, platform.Architecture)
-		opts = append(opts, remote.WithPlatform(*platform))
-	} else {
-		klog.Infof("[Registry] No platform specified, using default")
-	}
-
-	klog.Infof("[Registry] Pulling image from registry: %s", parsed.String())
-
-	image, err := remoteImageFunc(parsed, opts...)
-	if err != nil {
-		klog.Errorf("[Registry] Failed to pull image %s: %v", parsed.String(), err)
-
-		return nil, err
-	}
-
-	klog.Infof("[Registry] Successfully pulled image, extracting file: %s", artifactPath)
-
-	data, err := extractFileFromImage(image, artifactPath)
-	if err != nil {
-		klog.Errorf("[Registry] Failed to extract file %s from image: %v", artifactPath, err)
-
-		return nil, err
-	}
-
-	klog.Infof("[Registry] Successfully extracted file %s (%d bytes)", artifactPath, len(data))
-
-	return data, nil
+	return p
 }
 
 // ServeHTTP serves the registry proxy endpoint.
-func (rp *RegistryProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (rp *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Recover from panics to ensure we don't crash the node and try to send a proper error response
 	defer func() {
 		if rec := recover(); rec != nil {
-			klog.Errorf("Panic in RegistryProxy: %v", rec)
+			klog.Errorf("Panic in Proxy: %v", rec)
 			// Attempt to add CORS headers if not already sent (though they are added at start)
 			addCORSHeaders(w)
 			http.Error(w, fmt.Sprintf("internal server error: %v", rec), http.StatusInternalServerError)
@@ -213,11 +163,11 @@ func (rp *RegistryProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rp.writeArtifact(w, artifact)
 }
 
-func (rp *RegistryProxy) downloadArtifact(ctx context.Context, imageRef, artifactPath string, platform *v1.Platform) ([]byte, error) {
+func (rp *Proxy) downloadArtifact(ctx context.Context, imageRef, artifactPath string, platform *v1.Platform) ([]byte, error) {
 	return rp.fetchArtifact(ctx, imageRef, artifactPath, platform)
 }
 
-func (rp *RegistryProxy) writeArtifact(w http.ResponseWriter, artifact *cachedArtifact) {
+func (rp *Proxy) writeArtifact(w http.ResponseWriter, artifact *cachedArtifact) {
 	addCORSHeaders(w)
 
 	if artifact.contentType != "" {
@@ -251,7 +201,7 @@ func detectContentType(p string) string {
 	}
 }
 
-var variantPlatformAliases = map[string]v1.Platform{ //nolint:gochecknoglobals // static platform alias map reused per request
+var variantPlatformAliases = map[string]v1.Platform{ //nolint:gochecknoglobals // canonical alias table is read-only data shared by every request handler
 	"browser":      {OS: "wasi", Architecture: "wasm32"},
 	"wasm32":       {OS: "wasi", Architecture: "wasm32"},
 	"wasm32-web":   {OS: "wasi", Architecture: "wasm32"},
@@ -408,7 +358,7 @@ func extractFromLayer(reader io.Reader, target string, deleted map[string]struct
 
 		// Log first 10 files and any files that might be close to what we're looking for
 		if fileCount <= 10 || strings.Contains(headerPath, "pkg") || strings.Contains(headerPath, "wasm") || strings.Contains(headerPath, ".js") {
-			klog.Infof("[Registry] Found file in tar: %q (normalized: %q, target: %q, match: %v)", header.Name, headerPath, target, headerPath == target)
+			klog.V(logVerboseLevel).Infof("[Registry] Found file in tar: %q (normalized: %q, target: %q, match: %v)", header.Name, headerPath, target, headerPath == target)
 		}
 
 		if headerPath == "" {
@@ -455,4 +405,56 @@ func whiteoutTarget(p string) string {
 	cleaned := strings.TrimPrefix(base, ".wh.")
 
 	return normalizeArtifactPath(path.Join(dir, cleaned))
+}
+
+func (p *Proxy) fetchArtifactFromRegistry(
+	ctx context.Context,
+	ref string,
+	artifactPath string,
+	platform *v1.Platform,
+) ([]byte, error) {
+	klog.Infof("[Registry] Fetching artifact: ref=%s, path=%s, platform=%v", ref, artifactPath, platform)
+
+	parsed, err := name.ParseReference(ref, name.WithDefaultTag("latest"))
+	if err != nil {
+		klog.Errorf("[Registry] Failed to parse reference %s: %v", ref, err)
+
+		return nil, err
+	}
+
+	klog.Infof("[Registry] Parsed reference: %s", parsed.String())
+
+	opts := []remote.Option{
+		remote.WithContext(ctx),
+		remote.WithUserAgent(registryUserAgent),
+	}
+
+	if platform != nil {
+		klog.Infof("[Registry] Using platform: %s/%s", platform.OS, platform.Architecture)
+		opts = append(opts, remote.WithPlatform(*platform))
+	} else {
+		klog.Infof("[Registry] No platform specified, using default")
+	}
+
+	klog.Infof("[Registry] Pulling image from registry: %s", parsed.String())
+
+	image, err := p.imageFetcher(parsed, opts...)
+	if err != nil {
+		klog.Errorf("[Registry] Failed to pull image %s: %v", parsed.String(), err)
+
+		return nil, err
+	}
+
+	klog.Infof("[Registry] Successfully pulled image, extracting file: %s", artifactPath)
+
+	data, err := extractFileFromImage(image, artifactPath)
+	if err != nil {
+		klog.Errorf("[Registry] Failed to extract file %s from image: %v", artifactPath, err)
+
+		return nil, err
+	}
+
+	klog.Infof("[Registry] Successfully extracted file %s (%d bytes)", artifactPath, len(data))
+
+	return data, nil
 }

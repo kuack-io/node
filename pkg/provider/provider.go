@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
@@ -30,18 +30,19 @@ const (
 	TaintValueKuack = "kuack"
 	// writeTimeout is the timeout for writing to WebSocket connections.
 	writeTimeout = 10 * time.Second
+	// logListenerBufferSize is the buffered channel size for log listeners.
+	logListenerBufferSize = 100
 )
 
 var (
 	// ErrNoSuitableAgent is returned when no suitable agent is found for pod scheduling.
 	ErrNoSuitableAgent = errors.New("no suitable agent found")
-	// ErrInvalidAgentType is returned when an agent has an invalid type.
-	ErrInvalidAgentType = errors.New("invalid agent type")
 	// ErrPodHasNoContainers is returned when a pod has no containers.
 	ErrPodHasNoContainers = errors.New("pod has no containers")
 	// ErrAgentStreamNotWebSocket is returned when agent stream is not a WebSocket connection.
 	ErrAgentStreamNotWebSocket = errors.New("agent stream is not a WebSocket connection")
 	errUnknownAgentPodPhase    = errors.New("unknown agent pod phase")
+	errInvalidLogStream        = errors.New("unexpected log stream type")
 )
 
 const (
@@ -52,33 +53,15 @@ const (
 // WASMProvider implements the virtual-kubelet provider interface for browser-based WASM agents.
 type WASMProvider struct {
 	nodeName         string
-	agents           sync.Map // UUID -> *AgentConnection
+	nodeIP           string // Pod IP or service DNS name
+	agentRegistry    *AgentRegistry
 	pods             sync.Map // namespace/name -> *corev1.Pod
+	podLogs          sync.Map // namespace/name -> *PodLogStream
 	resources        *ResourceTracker
 	notifyFunc       func(*corev1.Pod)
 	nodeStatusNotify func(*corev1.Node)
 	startTime        time.Time
 	mu               sync.RWMutex
-}
-
-// AgentConnection represents a connected browser agent.
-type AgentConnection struct {
-	UUID          string
-	BrowserID     string // Persistent browser identifier (from localStorage)
-	Stream        any    // WebTransport stream
-	Resources     ResourceSpec
-	AllocatedPods map[string]*corev1.Pod
-	LastHeartbeat time.Time
-	IsThrottled   bool
-	Labels        map[string]string
-	mu            sync.RWMutex
-}
-
-// ResourceSpec describes agent capabilities.
-type ResourceSpec struct {
-	CPU    resource.Quantity
-	Memory resource.Quantity
-	GPU    bool
 }
 
 // ResourceTracker aggregates resources across all agents.
@@ -89,14 +72,142 @@ type ResourceTracker struct {
 	mu             sync.RWMutex
 }
 
+// PodLogStream manages log streaming for a pod.
+type PodLogStream struct {
+	mu        sync.RWMutex
+	buffer    []byte
+	listeners map[*LogListener]struct{}
+}
+
+// LogListener receives log updates.
+type LogListener struct {
+	ch   chan []byte
+	done chan struct{}
+}
+
+// LogReader implements io.ReadCloser for log streaming.
+type LogReader struct {
+	stream   *PodLogStream
+	listener *LogListener
+	buffer   []byte
+}
+
+func (r *LogReader) Read(p []byte) (int, error) {
+	if len(r.buffer) > 0 {
+		n := copy(p, r.buffer)
+		r.buffer = r.buffer[n:]
+
+		return n, nil
+	}
+
+	if r.listener == nil {
+		return 0, io.EOF
+	}
+
+	select {
+	case data, ok := <-r.listener.ch:
+		if !ok {
+			return 0, io.EOF
+		}
+
+		n := copy(p, data)
+		if n < len(data) {
+			r.buffer = data[n:]
+		}
+
+		return n, nil
+	case <-r.listener.done:
+		return 0, io.EOF
+	}
+}
+
+func (r *LogReader) Close() error {
+	if r.listener != nil {
+		r.stream.RemoveListener(r.listener)
+	}
+
+	return nil
+}
+
+func NewPodLogStream() *PodLogStream {
+	return &PodLogStream{
+		listeners: make(map[*LogListener]struct{}),
+	}
+}
+
+func (s *PodLogStream) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.buffer = append(s.buffer, p...)
+
+	for l := range s.listeners {
+		select {
+		case l.ch <- p:
+		case <-l.done:
+		default:
+			// Drop if blocked to prevent stalling
+		}
+	}
+
+	return len(p), nil
+}
+
+func (s *PodLogStream) Subscribe(follow bool) io.ReadCloser {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	currentLogs := make([]byte, len(s.buffer))
+	copy(currentLogs, s.buffer)
+
+	if !follow {
+		return &LogReader{
+			buffer: currentLogs,
+		}
+	}
+
+	l := &LogListener{
+		ch:   make(chan []byte, logListenerBufferSize),
+		done: make(chan struct{}),
+	}
+	s.listeners[l] = struct{}{}
+
+	return &LogReader{
+		stream:   s,
+		listener: l,
+		buffer:   currentLogs,
+	}
+}
+
+func (s *PodLogStream) RemoveListener(l *LogListener) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.listeners, l)
+	close(l.done)
+	close(l.ch)
+}
+
 // NewWASMProvider creates a new WASM provider instance.
 func NewWASMProvider(nodeName string) (*WASMProvider, error) {
 	klog.Infof("Initializing WASM provider for node: %s", nodeName)
 
+	// Detect node IP from environment (POD_IP) or use service name as fallback
+	nodeIP := os.Getenv("POD_IP")
+	if nodeIP == "" {
+		// In Kubernetes, use the service name which will be resolved by DNS
+		nodeIP = "kuack-node.kuack.svc.cluster.local"
+		klog.Infof("POD_IP not set, using service name: %s", nodeIP)
+	} else {
+		klog.Infof("Using POD_IP: %s", nodeIP)
+	}
+
 	return &WASMProvider{
-		nodeName:  nodeName,
-		resources: NewResourceTracker(),
-		startTime: time.Now(),
+		nodeName:      nodeName,
+		nodeIP:        nodeIP,
+		agentRegistry: NewAgentRegistry(),
+		resources:     NewResourceTracker(),
+		startTime:     time.Now(),
 	}, nil
 }
 
@@ -108,27 +219,45 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	// Deep copy to ensure thread safety
 	pod = pod.DeepCopy()
 
+	// Store pod immediately
+	p.pods.Store(getPodKey(pod), pod)
+
+	// Set initial status to Pending
+	pod.Status.Phase = corev1.PodPending
+	pod.Status.Reason = "Pending"
+	pod.Status.Message = "Waiting for agent with sufficient capacity"
+	pod.Status.Conditions = []corev1.PodCondition{
+		{
+			Type:               corev1.PodScheduled,
+			Status:             corev1.ConditionTrue,
+			LastTransitionTime: metav1.Now(),
+			Reason:             "Scheduled",
+			Message:            "Pod has been assigned to virtual node",
+		},
+	}
+
+	// Notify Kubernetes about the initial pending status
+	if p.notifyFunc != nil {
+		p.notifyFunc(pod.DeepCopy())
+	}
+
 	// Select an appropriate agent with sufficient capacity
 	agentUUID, err := p.selectAgent(pod)
 	if err != nil {
-		// No agent with sufficient capacity available - reject the pod
-		klog.Warningf("No suitable agent found for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		// No agent with sufficient capacity available
+		// Keep pod in Pending state - it will be retried when agents connect
+		klog.Infof("No suitable agent found for pod %s/%s yet: %v. Pod will remain pending.", pod.Namespace, pod.Name, err)
 
-		return errdefs.AsInvalidInput(err)
+		return nil
 	}
 
 	// Load the agent
-	agentVal, ok := p.agents.Load(agentUUID)
+	agent, ok := p.agentRegistry.Get(agentUUID)
 	if !ok {
 		// Agent disappeared between selection and loading
 		klog.Warningf("Agent %s not found after selection for pod %s/%s", agentUUID, pod.Namespace, pod.Name)
 
 		return errdefs.NotFound("agent not found")
-	}
-
-	agent, ok := agentVal.(*AgentConnection)
-	if !ok {
-		return errdefs.AsInvalidInput(ErrInvalidAgentType)
 	}
 
 	// Double-check capacity before allocating (race condition protection)
@@ -137,18 +266,16 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	agent.mu.RUnlock()
 
 	if !hasCapacity {
-		klog.Warningf("Agent %s no longer has sufficient capacity for pod %s/%s", agentUUID, pod.Namespace, pod.Name)
+		// Agent no longer has capacity - keep pod pending for retry
+		klog.Infof("Agent %s no longer has sufficient capacity for pod %s/%s. Pod will remain pending.", agentUUID, pod.Namespace, pod.Name)
 
-		return errdefs.AsInvalidInput(ErrNoSuitableAgent)
+		return nil
 	}
 
 	// Assign pod to agent
 	agent.mu.Lock()
 	agent.AllocatedPods[getPodKey(pod)] = pod
 	agent.mu.Unlock()
-
-	// Store pod
-	p.pods.Store(getPodKey(pod), pod)
 
 	// Send pod specification to agent via WebSocket
 	err = p.sendPodToAgent(agent, pod)
@@ -158,21 +285,22 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 		delete(agent.AllocatedPods, getPodKey(pod))
 		agent.mu.Unlock()
 
-		// Remove from stored pods
-		p.pods.Delete(getPodKey(pod))
-
 		klog.Errorf("Failed to send pod to agent: %v", err)
 
 		return err
 	}
 
-	// Update pod status to Pending (scheduled)
+	// Update pod status to Running (being executed by agent)
 	pod.Status.Phase = corev1.PodPending
+	pod.Status.Reason = "AgentAssigned"
+	pod.Status.Message = "Pod assigned to agent " + agentUUID
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
 			Type:               corev1.PodScheduled,
 			Status:             corev1.ConditionTrue,
 			LastTransitionTime: metav1.Now(),
+			Reason:             "Scheduled",
+			Message:            "Pod has been assigned to an agent",
 		},
 	}
 
@@ -181,6 +309,9 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 
 	// Update resource allocation
 	p.resources.AllocatePod(pod)
+
+	// Metrics
+	podsRunning.Inc()
 
 	// Notify Kubernetes about the scheduled status
 	if p.notifyFunc != nil {
@@ -211,12 +342,7 @@ func (p *WASMProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 	// Find the agent running this pod
 	var targetAgent *AgentConnection
 
-	p.agents.Range(func(key, value any) bool {
-		agent, ok := value.(*AgentConnection)
-		if !ok {
-			return true
-		}
-
+	p.agentRegistry.Range(func(uuid string, agent *AgentConnection) bool {
 		agent.mu.RLock()
 
 		if _, exists := agent.AllocatedPods[podKey]; exists {
@@ -249,6 +375,9 @@ func (p *WASMProvider) DeletePod(ctx context.Context, pod *corev1.Pod) error {
 
 	// Update resource allocation
 	p.resources.DeallocatePod(pod)
+
+	// Metrics
+	podsRunning.Dec()
 
 	// Notify with terminal status
 	pod = pod.DeepCopy()
@@ -329,8 +458,40 @@ func (p *WASMProvider) GetContainerLogs(
 	namespace, podName, containerName string,
 	opts api.ContainerLogOpts,
 ) (io.ReadCloser, error) {
-	// TODO: Implement log streaming from agent
-	return nil, errdefs.NotFound("logs not implemented yet")
+	key := fmt.Sprintf("%s/%s", namespace, podName)
+
+	// Get or create log stream
+	val, _ := p.podLogs.LoadOrStore(key, NewPodLogStream())
+
+	stream, ok := val.(*PodLogStream)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", errInvalidLogStream, key)
+	}
+
+	return stream.Subscribe(opts.Follow), nil
+}
+
+// AppendPodLog appends a log message to the pod's log stream.
+func (p *WASMProvider) AppendPodLog(namespace, name, logMsg string) {
+	key := fmt.Sprintf("%s/%s", namespace, name)
+	val, _ := p.podLogs.LoadOrStore(key, NewPodLogStream())
+
+	stream, ok := val.(*PodLogStream)
+	if !ok {
+		klog.Errorf("unexpected log stream type for %s", key)
+
+		return
+	}
+
+	// Ensure log message ends with newline if not present
+	if !strings.HasSuffix(logMsg, "\n") {
+		logMsg += "\n"
+	}
+
+	_, err := stream.Write([]byte(logMsg))
+	if err != nil {
+		klog.Errorf("failed to append log for %s: %v", key, err)
+	}
 }
 
 // RunInContainer executes a command in a container.
@@ -391,9 +552,7 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 			Name: p.nodeName,
 			Labels: map[string]string{
 				"kuack.io/node-type":     "kuack-node",
-				"kubernetes.io/role":     "agent",
 				"kubernetes.io/hostname": p.nodeName,
-				"alpha.service-controller.kubernetes.io/exclude-balancer": "true",
 			},
 		},
 		Spec: corev1.NodeSpec{
@@ -411,7 +570,11 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 			Addresses: []corev1.NodeAddress{
 				{
 					Type:    corev1.NodeInternalIP,
-					Address: "127.0.0.1",
+					Address: p.nodeIP,
+				},
+				{
+					Type:    corev1.NodeHostName,
+					Address: p.nodeName,
 				},
 			},
 			DaemonEndpoints: corev1.NodeDaemonEndpoints{
@@ -775,12 +938,7 @@ func upsertCondition(conditions []corev1.PodCondition, condition corev1.PodCondi
 }
 
 func (p *WASMProvider) releasePodAllocation(podKey string) {
-	p.agents.Range(func(_, value any) bool {
-		agent, ok := value.(*AgentConnection)
-		if !ok {
-			return true
-		}
-
+	p.agentRegistry.Range(func(_ string, agent *AgentConnection) bool {
 		agent.mu.Lock()
 
 		if _, exists := agent.AllocatedPods[podKey]; exists {
@@ -819,19 +977,11 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 
 	// Simple first-fit strategy for MVP. TODO: Implement more sophisticated scheduling.
 
-	p.agents.Range(func(key, value any) bool {
-		uuid, ok := key.(string)
-		if !ok {
-			return true
-		}
-
-		agent, ok := value.(*AgentConnection)
-		if !ok {
-			return true
-		}
-
+	p.agentRegistry.Range(func(uuid string, agent *AgentConnection) bool {
 		// Skip throttled agents
 		if agent.IsThrottled {
+			klog.V(logVerboseLevel).Infof("Agent %s is throttled, skipping", uuid)
+
 			return true
 		}
 
@@ -854,17 +1004,23 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 			availableCPU.Sub(allocatedCPU)
 			agent.mu.RUnlock()
 
+			klog.V(logVerboseLevel).Infof("Agent %s available CPU: %s", uuid, availableCPU.String())
+
 			// Select agent with most available CPU
-			if availableCPU.Cmp(maxAvailable) > 0 {
+			if availableCPU.Cmp(maxAvailable) >= 0 {
 				maxAvailable = availableCPU
 				selectedAgent = uuid
 			}
+		} else {
+			klog.V(logVerboseLevel).Infof("Agent %s has insufficient capacity", uuid)
 		}
 
 		return true
 	})
 
 	if selectedAgent == "" {
+		klog.Warningf("No suitable agent found. Agents count: %d", p.agentsCount())
+
 		return "", ErrNoSuitableAgent
 	}
 
@@ -890,14 +1046,8 @@ func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) e
 		return err
 	}
 
-	// Get WebSocket connection
-	conn, ok := agent.Stream.(*websocket.Conn)
-	if !ok {
-		return ErrAgentStreamNotWebSocket
-	}
-
 	// Set write deadline
-	err = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+	err = agent.Stream.SetWriteDeadline(time.Now().Add(writeTimeout))
 	if err != nil {
 		klog.Errorf("Failed to set write deadline: %v", err)
 
@@ -917,7 +1067,7 @@ func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) e
 	}
 
 	// Send message via WebSocket
-	err = conn.WriteJSON(msg)
+	err = agent.Stream.WriteJSON(msg)
 	if err != nil {
 		return err
 	}
@@ -927,12 +1077,65 @@ func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) e
 	return nil
 }
 
-//nolint:unparam // TODO: Implement actual deletion logic that may return errors
 func (p *WASMProvider) deletePodFromAgent(agent *AgentConnection, pod *corev1.Pod) error {
-	// TODO: Send delete command via WebSocket
-	klog.V(logVerboseLevel).Infof("Deleting pod %s from agent %s", getPodKey(pod), agent.UUID)
+	deleteData := struct {
+		Namespace string `json:"namespace"`
+		Name      string `json:"name"`
+	}{
+		Namespace: pod.Namespace,
+		Name:      pod.Name,
+	}
+
+	data, err := json.Marshal(deleteData)
+	if err != nil {
+		return fmt.Errorf("failed to marshal delete data: %w", err)
+	}
+
+	// Set write deadline
+	err = agent.Stream.SetWriteDeadline(time.Now().Add(writeTimeout))
+	if err != nil {
+		klog.Errorf("Failed to set write deadline: %v", err)
+
+		return err
+	}
+
+	msg := struct {
+		Type      string          `json:"type"`
+		Timestamp time.Time       `json:"timestamp"`
+		Data      json.RawMessage `json:"data"`
+	}{
+		Type:      "pod_delete",
+		Timestamp: time.Now(),
+		Data:      json.RawMessage(data),
+	}
+
+	// Send message via WebSocket
+	// Note: WriteJSON is not thread-safe. We rely on the fact that CreatePod/DeletePod
+	// are serialized for the same pod, but for the same agent they might overlap.
+	// Ideally we should lock the connection.
+	// agent.mu.Lock() // This might deadlock if held elsewhere?
+	// defer agent.mu.Unlock()
+
+	err = agent.Stream.WriteJSON(msg)
+	if err != nil {
+		return fmt.Errorf("failed to send delete command: %w", err)
+	}
+
+	klog.V(logVerboseLevel).Infof("Sent delete command for pod %s to agent %s", getPodKey(pod), agent.UUID)
 
 	return nil
+}
+
+func (p *WASMProvider) agentsCount() int {
+	count := 0
+
+	p.agentRegistry.Range(func(_ string, _ *AgentConnection) bool {
+		count++
+
+		return true
+	})
+
+	return count
 }
 
 func (p *WASMProvider) getNodeConditions() []corev1.NodeCondition {

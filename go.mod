@@ -5,6 +5,8 @@ go 1.25.5
 require (
 	github.com/google/go-containerregistry v0.20.2
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
+	github.com/prometheus/client_golang v1.16.0
+	github.com/stretchr/testify v1.11.1
 	github.com/virtual-kubelet/virtual-kubelet v1.11.0
 	k8s.io/api v0.35.0
 	k8s.io/apimachinery v0.35.0
@@ -49,12 +51,12 @@ require (
 	github.com/opencontainers/image-spec v1.1.0-rc3 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/prometheus/client_golang v1.16.0 // indirect
 	github.com/prometheus/client_model v0.4.0 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.10.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/stretchr/objx v0.5.2 // indirect
 	github.com/vbatts/tar-split v0.11.3 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.opencensus.io v0.24.0 // indirect

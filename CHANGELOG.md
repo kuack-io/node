@@ -1,3 +1,9 @@
+## [1.2.4](https://github.com/kuack-io/node/compare/1.2.3...1.2.4) (2025-12-29)
+
+### Bug Fixes
+
+* allow BestEffort on throttled agents ([7d784e5](https://github.com/kuack-io/node/commit/7d784e53b4fa4864aefc6c913cfdd5979ca52142))
+
 ## [1.2.3](https://github.com/kuack-io/node/compare/1.2.2...1.2.3) (2025-12-29)
 
 ### Bug Fixes

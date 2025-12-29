@@ -599,14 +599,28 @@ func (a *AgentConnection) HasCapacity(pod *corev1.Pod) bool {
 	// Calculate total requested resources for the pod
 	var requestedCPU, requestedMemory resource.Quantity
 
+	hasCPURequest := false
+	hasMemoryRequest := false
+
 	for _, container := range pod.Spec.Containers {
 		if cpu, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
 			requestedCPU.Add(cpu)
+
+			hasCPURequest = true
 		}
 
 		if mem, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
 			requestedMemory.Add(mem)
+
+			hasMemoryRequest = true
 		}
+	}
+
+	// If pod has no resource requests, it can be scheduled anywhere
+	if !hasCPURequest && !hasMemoryRequest {
+		klog.V(logVerboseLevel).Infof("Pod %s/%s has no resource requests, agent %s has capacity", pod.Namespace, pod.Name, a.UUID)
+
+		return true
 	}
 
 	// Calculate currently allocated resources
@@ -632,8 +646,13 @@ func (a *AgentConnection) HasCapacity(pod *corev1.Pod) bool {
 	availableMemory.Sub(allocatedMemory)
 
 	// Check if available resources are sufficient
-	hasCPU := availableCPU.Cmp(requestedCPU) >= 0
-	hasMemory := availableMemory.Cmp(requestedMemory) >= 0
+	// If a resource is not requested, we don't need to check it
+	hasCPU := !hasCPURequest || availableCPU.Cmp(requestedCPU) >= 0
+	hasMemory := !hasMemoryRequest || availableMemory.Cmp(requestedMemory) >= 0
+
+	// Log detailed capacity check for debugging
+	klog.V(logVerboseLevel).Infof("HasCapacity check for agent %s: requested CPU=%s (hasRequest=%v), Memory=%s (hasRequest=%v); available CPU=%s, Memory=%s; hasCPU=%v, hasMemory=%v",
+		a.UUID, requestedCPU.String(), hasCPURequest, requestedMemory.String(), hasMemoryRequest, availableCPU.String(), availableMemory.String(), hasCPU, hasMemory)
 
 	return hasCPU && hasMemory
 }
@@ -975,18 +994,37 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 	// Initialize maxAvailable to zero (empty quantity)
 	maxAvailable = resource.MustParse("0")
 
+	agentCount := 0
+	throttledCount := 0
+	insufficientCapacityCount := 0
+
 	// Simple first-fit strategy for MVP. TODO: Implement more sophisticated scheduling.
 
 	p.agentRegistry.Range(func(uuid string, agent *AgentConnection) bool {
+		agentCount++
+
 		// Skip throttled agents
 		if agent.IsThrottled {
+			throttledCount++
+
 			klog.V(logVerboseLevel).Infof("Agent %s is throttled, skipping", uuid)
 
 			return true
 		}
 
+		// Log agent resources for debugging
+		agent.mu.RLock()
+		agentCPU := agent.Resources.CPU.String()
+		agentMemory := agent.Resources.Memory.String()
+		allocatedPodCount := len(agent.AllocatedPods)
+		agent.mu.RUnlock()
+
+		klog.V(logVerboseLevel).Infof("Evaluating agent %s for pod %s/%s: CPU=%s, Memory=%s, AllocatedPods=%d",
+			uuid, pod.Namespace, pod.Name, agentCPU, agentMemory, allocatedPodCount)
+
 		// Check if agent has enough resources
-		if agent.HasCapacity(pod) {
+		hasCapacity := agent.HasCapacity(pod)
+		if hasCapacity {
 			// Calculate available CPU for this agent
 			agent.mu.RLock()
 
@@ -1010,19 +1048,25 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 			if availableCPU.Cmp(maxAvailable) >= 0 {
 				maxAvailable = availableCPU
 				selectedAgent = uuid
+				klog.V(logVerboseLevel).Infof("Agent %s selected as candidate (available CPU: %s)", uuid, availableCPU.String())
 			}
 		} else {
-			klog.V(logVerboseLevel).Infof("Agent %s has insufficient capacity", uuid)
+			insufficientCapacityCount++
+
+			klog.V(logVerboseLevel).Infof("Agent %s has insufficient capacity for pod %s/%s", uuid, pod.Namespace, pod.Name)
 		}
 
 		return true
 	})
 
 	if selectedAgent == "" {
-		klog.Warningf("No suitable agent found. Agents count: %d", p.agentsCount())
+		klog.Warningf("No suitable agent found for pod %s/%s. Total agents: %d, Throttled: %d, Insufficient capacity: %d",
+			pod.Namespace, pod.Name, agentCount, throttledCount, insufficientCapacityCount)
 
 		return "", ErrNoSuitableAgent
 	}
+
+	klog.Infof("Selected agent %s for pod %s/%s (available CPU: %s)", selectedAgent, pod.Namespace, pod.Name, maxAvailable.String())
 
 	return selectedAgent, nil
 }
@@ -1124,18 +1168,6 @@ func (p *WASMProvider) deletePodFromAgent(agent *AgentConnection, pod *corev1.Po
 	klog.V(logVerboseLevel).Infof("Sent delete command for pod %s to agent %s", getPodKey(pod), agent.UUID)
 
 	return nil
-}
-
-func (p *WASMProvider) agentsCount() int {
-	count := 0
-
-	p.agentRegistry.Range(func(_ string, _ *AgentConnection) bool {
-		count++
-
-		return true
-	})
-
-	return count
 }
 
 func (p *WASMProvider) getNodeConditions() []corev1.NodeCondition {

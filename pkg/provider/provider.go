@@ -998,18 +998,40 @@ func (p *WASMProvider) selectAgent(pod *corev1.Pod) (string, error) {
 	throttledCount := 0
 	insufficientCapacityCount := 0
 
+	// Check if pod has resource requests (BestEffort pods can run on throttled agents)
+	// Use the same logic as HasCapacity
+	hasCPURequest := false
+	hasMemoryRequest := false
+
+	for _, container := range pod.Spec.Containers {
+		if _, ok := container.Resources.Requests[corev1.ResourceCPU]; ok {
+			hasCPURequest = true
+		}
+
+		if _, ok := container.Resources.Requests[corev1.ResourceMemory]; ok {
+			hasMemoryRequest = true
+		}
+	}
+
+	podHasResourceRequests := hasCPURequest || hasMemoryRequest
+
 	// Simple first-fit strategy for MVP. TODO: Implement more sophisticated scheduling.
 
 	p.agentRegistry.Range(func(uuid string, agent *AgentConnection) bool {
 		agentCount++
 
-		// Skip throttled agents
+		// Skip throttled agents unless pod has no resource requests (BestEffort)
 		if agent.IsThrottled {
-			throttledCount++
+			if podHasResourceRequests {
+				throttledCount++
 
-			klog.V(logVerboseLevel).Infof("Agent %s is throttled, skipping", uuid)
+				klog.V(logVerboseLevel).Infof("Agent %s is throttled, skipping (pod %s/%s has resource requests)", uuid, pod.Namespace, pod.Name)
 
-			return true
+				return true
+			}
+
+			// Allow BestEffort pods on throttled agents
+			klog.V(logVerboseLevel).Infof("Agent %s is throttled, but allowing BestEffort pod %s/%s", uuid, pod.Namespace, pod.Name)
 		}
 
 		// Log agent resources for debugging

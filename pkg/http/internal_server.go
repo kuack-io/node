@@ -48,7 +48,7 @@ func NewInternalServer(port int, logProvider provider.LogProvider) *InternalServ
 	// or simpler: just reimplement the simple health handler here or make it public in health package.
 	// Let's check health package content again.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		klog.Infof("InternalServer: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+		klog.V(logVerboseLevel).Infof("InternalServer: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
 		health.HealthzHandler(w, r)
 	})
 

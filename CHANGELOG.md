@@ -1,3 +1,9 @@
+## [1.2.3](https://github.com/kuack-io/node/compare/1.2.2...1.2.3) (2025-12-29)
+
+### Bug Fixes
+
+* better capacity handling ([b949183](https://github.com/kuack-io/node/commit/b949183fd22f3d90412d4daaf7c0faa813b571da))
+
 ## [1.2.2](https://github.com/kuack-io/node/compare/1.2.1...1.2.2) (2025-12-28)
 
 ### Dependencies

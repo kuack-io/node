@@ -23,6 +23,11 @@ func TestRunNodeController(t *testing.T) {
 	require.NoError(t, err)
 
 	kubeClient := fake.NewClientset()
+
+	// Set kubelet version (required before GetNode())
+	err = p.SetKubeletVersionFromCluster(context.Background(), kubeClient)
+	require.NoError(t, err)
+
 	started := make(chan struct{}, 1)
 
 	kubeClient.PrependWatchReactor("pods", func(action k8stesting.Action) (bool, watch.Interface, error) {

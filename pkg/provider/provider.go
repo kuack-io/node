@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 )
 
@@ -41,8 +42,12 @@ var (
 	ErrPodHasNoContainers = errors.New("pod has no containers")
 	// ErrAgentStreamNotWebSocket is returned when agent stream is not a WebSocket connection.
 	ErrAgentStreamNotWebSocket = errors.New("agent stream is not a WebSocket connection")
-	errUnknownAgentPodPhase    = errors.New("unknown agent pod phase")
-	errInvalidLogStream        = errors.New("unexpected log stream type")
+	// ErrNilKubeClient is returned when a nil Kubernetes client is passed.
+	ErrNilKubeClient = errors.New("kubernetes client is required to detect cluster version")
+	// ErrNoVersionInfo is returned when version info cannot be determined from the cluster.
+	ErrNoVersionInfo        = errors.New("unable to determine Kubernetes version: GitVersion, Major, and Minor are all empty")
+	errUnknownAgentPodPhase = errors.New("unknown agent pod phase")
+	errInvalidLogStream     = errors.New("unexpected log stream type")
 )
 
 const (
@@ -61,6 +66,7 @@ type WASMProvider struct {
 	notifyFunc       func(*corev1.Pod)
 	nodeStatusNotify func(*corev1.Node)
 	startTime        time.Time
+	kubeletVersion   string // Kubernetes cluster version
 	mu               sync.RWMutex
 }
 
@@ -203,11 +209,12 @@ func NewWASMProvider(nodeName string) (*WASMProvider, error) {
 	}
 
 	return &WASMProvider{
-		nodeName:      nodeName,
-		nodeIP:        nodeIP,
-		agentRegistry: NewAgentRegistry(),
-		resources:     NewResourceTracker(),
-		startTime:     time.Now(),
+		nodeName:       nodeName,
+		nodeIP:         nodeIP,
+		agentRegistry:  NewAgentRegistry(),
+		resources:      NewResourceTracker(),
+		startTime:      time.Now(),
+		kubeletVersion: "", // Must be set via SetKubeletVersionFromCluster
 	}, nil
 }
 
@@ -562,7 +569,7 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 			NodeInfo: corev1.NodeSystemInfo{
 				OperatingSystem: "wasm",
 				Architecture:    "wasm32",
-				KubeletVersion:  "v1.29.0-kuack-node",
+				KubeletVersion:  p.getKubeletVersion(),
 			},
 			Capacity:    p.resources.totalCapacity,
 			Allocatable: p.resources.GetAllocatable(),
@@ -584,6 +591,40 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 			},
 		},
 	}
+}
+
+// SetKubeletVersionFromCluster retrieves the Kubernetes cluster version from the API server
+// and updates the provider's kubelet version to match. This must be called before GetNode() is used.
+func (p *WASMProvider) SetKubeletVersionFromCluster(ctx context.Context, kubeClient kubernetes.Interface) error {
+	if kubeClient == nil {
+		return ErrNilKubeClient
+	}
+
+	serverVersion, err := kubeClient.Discovery().ServerVersion()
+	if err != nil {
+		return fmt.Errorf("failed to get Kubernetes server version: %w", err)
+	}
+
+	// Format: v1.34.0 -> v1.34.0-kuack-node
+	version := serverVersion.GitVersion
+	if version == "" {
+		// Fallback to Major.Minor if GitVersion is not available
+		if serverVersion.Major == "" || serverVersion.Minor == "" {
+			return ErrNoVersionInfo
+		}
+
+		version = fmt.Sprintf("v%s.%s", serverVersion.Major, serverVersion.Minor)
+	}
+
+	versionWithSuffix := version + "-kuack-node"
+
+	p.mu.Lock()
+	p.kubeletVersion = versionWithSuffix
+	p.mu.Unlock()
+
+	klog.Infof("Detected and set kubelet version to match cluster version: %s", versionWithSuffix)
+
+	return nil
 }
 
 // Helper functions
@@ -781,6 +822,19 @@ func (p *WASMProvider) UpdatePodStatus(namespace, name string, status AgentPodSt
 	}
 
 	return nil
+}
+
+// getKubeletVersion returns the stored Kubernetes version, with proper locking.
+// Panics if version has not been set via SetKubeletVersionFromCluster.
+func (p *WASMProvider) getKubeletVersion() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.kubeletVersion == "" {
+		panic("kubeletVersion not set: SetKubeletVersionFromCluster must be called before GetNode()")
+	}
+
+	return p.kubeletVersion
 }
 
 func agentPhaseFromString(phase string) (corev1.PodPhase, error) {

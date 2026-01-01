@@ -1,6 +1,7 @@
 package provider_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 type MockAgentStream struct {
@@ -32,6 +34,12 @@ func setupTestProvider(t *testing.T) (*provider.WASMProvider, *MockAgentStream, 
 	t.Helper()
 
 	p, err := provider.NewWASMProvider("node-1")
+	require.NoError(t, err)
+
+	// Set kubelet version using a fake Kubernetes client
+	// This is required before GetNode() can be called
+	fakeClient := fake.NewClientset()
+	err = p.SetKubeletVersionFromCluster(context.Background(), fakeClient)
 	require.NoError(t, err)
 
 	mockStream := new(MockAgentStream)

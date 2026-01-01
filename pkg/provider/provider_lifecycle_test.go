@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestProvider_CreatePod_NoAgent(t *testing.T) {
@@ -130,6 +131,11 @@ func TestProvider_GetNode(t *testing.T) {
 	p, err := provider.NewWASMProvider("node-1")
 	require.NoError(t, err)
 
+	// Set kubelet version (required before GetNode())
+	fakeClient := fake.NewClientset()
+	err = p.SetKubeletVersionFromCluster(context.Background(), fakeClient)
+	require.NoError(t, err)
+
 	node := p.GetNode()
 	assert.Equal(t, "node-1", node.Name)
 	assert.Equal(t, "wasm", node.Status.NodeInfo.OperatingSystem)
@@ -139,6 +145,11 @@ func TestProvider_NotifyNodeStatus(t *testing.T) {
 	t.Parallel()
 
 	p, err := provider.NewWASMProvider("node-1")
+	require.NoError(t, err)
+
+	// Set kubelet version (required before GetNode())
+	fakeClient := fake.NewClientset()
+	err = p.SetKubeletVersionFromCluster(context.Background(), fakeClient)
 	require.NoError(t, err)
 
 	ch := make(chan *corev1.Node, 1)

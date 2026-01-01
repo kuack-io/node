@@ -81,6 +81,12 @@ func SetupComponents(ctx context.Context, cfg *config.Config) (*Components, erro
 		return nil, fmt.Errorf("failed to get Kubernetes client: %w", err)
 	}
 
+	// Set kubelet version to match the Kubernetes cluster version (required)
+	err = wasmProvider.SetKubeletVersionFromCluster(ctx, kubeClient)
+	if err != nil {
+		return nil, fmt.Errorf("failed to detect Kubernetes cluster version: %w", err)
+	}
+
 	// Request TLS certificates from Kubernetes CSR API if not provided
 	certFile := cfg.TLSCertFile
 	keyFile := cfg.TLSKeyFile

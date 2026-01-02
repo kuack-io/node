@@ -1,3 +1,9 @@
+## [1.2.6](https://github.com/kuack-io/node/compare/1.2.5...1.2.6) (2026-01-02)
+
+### Bug Fixes
+
+* improve node de-registration ([664743c](https://github.com/kuack-io/node/commit/664743cb583acc6d02eacf1d2d9b15127cfe90c9))
+
 ## [1.2.5](https://github.com/kuack-io/node/compare/1.2.4...1.2.5) (2026-01-02)
 
 ### Bug Fixes

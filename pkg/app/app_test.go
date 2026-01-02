@@ -2,7 +2,11 @@ package app_test
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -10,8 +14,9 @@ import (
 
 	"kuack-node/pkg/app"
 	"kuack-node/pkg/config"
-	"kuack-node/pkg/http"
+	kuackhttp "kuack-node/pkg/http"
 	"kuack-node/pkg/provider"
+	tlsutil "kuack-node/pkg/tls"
 
 	"k8s.io/client-go/kubernetes"
 )
@@ -19,13 +24,24 @@ import (
 func setupTestConfig(t *testing.T) (*config.Config, func()) {
 	t.Helper()
 
+	fakeAPIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// SetupComponents() calls Discovery().ServerVersion(), which hits GET /version.
+		if r.Method == http.MethodGet && r.URL.Path == "/version" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"major":"1","minor":"34","gitVersion":"v1.34.0"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+
 	// Create dummy kubeconfig
-	kubeconfigContent := `
+	kubeconfigContent := fmt.Sprintf(`
 apiVersion: v1
 clusters:
 - cluster:
-    server: https://localhost:6443
-    insecure-skip-tls-verify: true
+    server: %s
   name: kubernetes
 contexts:
 - context:
@@ -40,7 +56,7 @@ users:
   user:
     username: admin
     password: password
-`
+`, fakeAPIServer.URL)
 	tmpKubeconfig, err := os.CreateTemp(t.TempDir(), "kubeconfig")
 	require.NoError(t, err)
 
@@ -49,15 +65,10 @@ users:
 	err = tmpKubeconfig.Close()
 	require.NoError(t, err)
 
-	// Create dummy cert/key
-	tmpCert, err := os.CreateTemp(t.TempDir(), "cert")
-	require.NoError(t, err)
-	err = tmpCert.Close()
-	require.NoError(t, err)
-
-	tmpKey, err := os.CreateTemp(t.TempDir(), "key")
-	require.NoError(t, err)
-	err = tmpKey.Close()
+	// Create a real cert/key for TLS server startup in tests.
+	tmpCertPath := filepath.Join(t.TempDir(), "cert.pem")
+	tmpKeyPath := filepath.Join(t.TempDir(), "key.pem")
+	err = tlsutil.GenerateSelfSignedCert("127.0.0.1", tmpCertPath, tmpKeyPath)
 	require.NoError(t, err)
 
 	cfg := &config.Config{
@@ -66,14 +77,16 @@ users:
 		InternalPort:   0,
 		AgentToken:     "token",
 		KubeconfigPath: tmpKubeconfig.Name(),
-		TLSCertFile:    tmpCert.Name(),
-		TLSKeyFile:     tmpKey.Name(),
+		TLSCertFile:    tmpCertPath,
+		TLSKeyFile:     tmpKeyPath,
 	}
 
 	cleanup := func() {
+		fakeAPIServer.Close()
+
 		_ = os.Remove(tmpKubeconfig.Name())
-		_ = os.Remove(tmpCert.Name())
-		_ = os.Remove(tmpKey.Name())
+		_ = os.Remove(tmpCertPath)
+		_ = os.Remove(tmpKeyPath)
 	}
 
 	return cfg, cleanup
@@ -81,6 +94,9 @@ users:
 
 func TestSetupComponents(t *testing.T) {
 	t.Parallel()
+
+	restore := app.LockDepsForTesting(t)
+	t.Cleanup(restore)
 
 	cfg, cleanup := setupTestConfig(t)
 	defer cleanup()
@@ -97,6 +113,9 @@ func TestSetupComponents(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	t.Parallel()
+
+	restore := app.LockDepsForTesting(t)
+	t.Cleanup(restore)
 
 	cfg, cleanup := setupTestConfig(t)
 	defer cleanup()
@@ -122,12 +141,15 @@ func TestRun(t *testing.T) {
 func TestStartPublicServerAndShutdown(t *testing.T) {
 	t.Parallel()
 
+	restore := app.LockDepsForTesting(t)
+	t.Cleanup(restore)
+
 	// Setup
 	p, err := provider.NewWASMProvider("test-node")
 	require.NoError(t, err)
 
 	// Use port 0 for random port
-	server, err := http.NewPublicServer(0, "test-token", p)
+	server, err := kuackhttp.NewPublicServer(0, "test-token", p)
 	require.NoError(t, err)
 
 	ctx := t.Context()
@@ -154,12 +176,15 @@ func TestStartPublicServerAndShutdown(t *testing.T) {
 func TestStartInternalServerAndShutdown(t *testing.T) {
 	t.Parallel()
 
+	restore := app.LockDepsForTesting(t)
+	t.Cleanup(restore)
+
 	// Setup
 	p, err := provider.NewWASMProvider("test-node")
 	require.NoError(t, err)
 
 	// Use port 0 for random port
-	server := http.NewInternalServer(0, p)
+	server := kuackhttp.NewInternalServer(0, p)
 
 	ctx := t.Context()
 
@@ -184,6 +209,9 @@ func TestStartInternalServerAndShutdown(t *testing.T) {
 
 func TestShutdownGracefully_Errors(t *testing.T) {
 	t.Parallel()
+
+	restore := app.LockDepsForTesting(t)
+	t.Cleanup(restore)
 
 	ctx := context.Background()
 	publicErrChan := make(chan error, 1)

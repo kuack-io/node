@@ -147,7 +147,7 @@ func TestStartPublicServerAndShutdown(t *testing.T) {
 	}
 
 	// Test Shutdown
-	err = app.ShutdownGracefully(ctx, server, nil, errChan, nil)
+	err = app.ShutdownGracefully(ctx, server, nil, errChan, nil, "", nil)
 	require.NoError(t, err)
 }
 
@@ -178,7 +178,7 @@ func TestStartInternalServerAndShutdown(t *testing.T) {
 	}
 
 	// Test Shutdown
-	err = app.ShutdownGracefully(ctx, nil, server, nil, errChan)
+	err = app.ShutdownGracefully(ctx, nil, server, nil, errChan, "", nil)
 	require.NoError(t, err)
 }
 
@@ -192,7 +192,7 @@ func TestShutdownGracefully_Errors(t *testing.T) {
 	// Simulate error
 	publicErrChan <- assertError("public error")
 
-	err := app.ShutdownGracefully(ctx, nil, nil, publicErrChan, internalErrChan)
+	err := app.ShutdownGracefully(ctx, nil, nil, publicErrChan, internalErrChan, "", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "public server error")
 
@@ -202,7 +202,7 @@ func TestShutdownGracefully_Errors(t *testing.T) {
 	internalErrChan = make(chan error, 1)
 	internalErrChan <- assertError("internal error")
 
-	err = app.ShutdownGracefully(ctx, nil, nil, publicErrChan, internalErrChan)
+	err = app.ShutdownGracefully(ctx, nil, nil, publicErrChan, internalErrChan, "", nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "internal server error")
 }

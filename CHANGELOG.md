@@ -1,3 +1,10 @@
+## [1.2.5](https://github.com/kuack-io/node/compare/1.2.4...1.2.5) (2026-01-02)
+
+### Bug Fixes
+
+* de-register node on shutdown ([c2a67d5](https://github.com/kuack-io/node/commit/c2a67d5d2522936410c5a85686d9d182071ee550))
+* no static version ([a948985](https://github.com/kuack-io/node/commit/a948985457a17fd5aba584d3e0c35e4c53ae4ac7))
+
 ## [1.2.4](https://github.com/kuack-io/node/compare/1.2.3...1.2.4) (2025-12-29)
 
 ### Bug Fixes

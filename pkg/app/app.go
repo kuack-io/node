@@ -37,6 +37,8 @@ var (
 
 const podControllerWorkers = 5
 
+const nodeDeleteTimeout = 10 * time.Second
+
 // allow overriding external dependencies in tests.
 //
 //nolint:gochecknoglobals // package-level seams let tests stub kube clients, TLS, and HTTP servers without plumbing args everywhere
@@ -333,13 +335,22 @@ func ShutdownGracefully(
 ) error {
 	klog.Info("Shutting down gracefully...")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, config.ShutdownTimeout)
+	// NOTE: ctx is canceled on SIGTERM to stop the node controller. We still need a live
+	// context to delete the Node and shutdown HTTP servers within the Pod's grace period,
+	// so we explicitly drop cancellation propagation from ctx.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), config.ShutdownTimeout)
 	defer shutdownCancel()
 
 	// Delete the node from Kubernetes cluster first
-	// This ensures the node is removed even if the pod is forcefully terminated
 	if nodeName != "" && kubeClient != nil {
-		err := DeleteNodeFromCluster(shutdownCtx, nodeName, kubeClient)
+		// Keep node deletion bounded so shutdown doesn't hang on network issues.
+		deleteTimeout := min(nodeDeleteTimeout, config.ShutdownTimeout)
+
+		deleteCtx, deleteCancel := context.WithTimeout(shutdownCtx, deleteTimeout)
+		err := DeleteNodeFromCluster(deleteCtx, nodeName, kubeClient)
+
+		deleteCancel()
+
 		if err != nil {
 			klog.Errorf("Error deleting node from cluster: %v", err)
 			// Continue with shutdown even if node deletion fails
@@ -413,13 +424,14 @@ func Run(ctx context.Context, cfg *config.Config, nodeRunner NodeControllerRunne
 		nodeRunner = RunNodeController
 	}
 
-	err = nodeRunner(ctx, components.WASMProvider, components.KubeClient)
-	if err != nil {
-		return err
+	runErr := nodeRunner(ctx, components.WASMProvider, components.KubeClient)
+	// When the Pod is terminated, ctx is canceled via SIGTERM handling in main().
+	// Treat that as a normal stop condition so we still run cleanup.
+	if runErr != nil && errors.Is(runErr, context.Canceled) {
+		runErr = nil
 	}
 
-	// Graceful shutdown
-	return ShutdownGracefully(
+	shutdownErr := ShutdownGracefully(
 		ctx,
 		components.PublicServer,
 		components.InternalServer,
@@ -428,4 +440,14 @@ func Run(ctx context.Context, cfg *config.Config, nodeRunner NodeControllerRunne
 		cfg.NodeName,
 		components.KubeClient,
 	)
+
+	if runErr != nil && shutdownErr != nil {
+		return fmt.Errorf("%w; shutdown error: %w", runErr, shutdownErr)
+	}
+
+	if runErr != nil {
+		return runErr
+	}
+
+	return shutdownErr
 }

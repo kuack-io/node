@@ -15,6 +15,7 @@ import (
 
 	"github.com/virtual-kubelet/virtual-kubelet/node"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/informers"
@@ -28,6 +29,10 @@ import (
 var (
 	// ErrNodeControllerPanic is returned when the node controller panics.
 	ErrNodeControllerPanic = errors.New("node controller panicked")
+	// ErrKubeClientRequired is returned when a Kubernetes client is required but not provided.
+	ErrKubeClientRequired = errors.New("kubernetes client is required to delete node")
+	// ErrNodeNameRequired is returned when a node name is required but not provided.
+	ErrNodeNameRequired = errors.New("node name is required to delete node")
 )
 
 const podControllerWorkers = 5
@@ -283,6 +288,39 @@ func RunNodeController(
 	return nil
 }
 
+// DeleteNodeFromCluster deletes the kuack node from the Kubernetes cluster.
+func DeleteNodeFromCluster(
+	ctx context.Context,
+	nodeName string,
+	kubeClient kubernetes.Interface,
+) error {
+	if kubeClient == nil {
+		return ErrKubeClientRequired
+	}
+
+	if nodeName == "" {
+		return ErrNodeNameRequired
+	}
+
+	klog.Infof("Deleting node %s from cluster...", nodeName)
+
+	err := kubeClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	if err != nil {
+		// If the node doesn't exist, that's okay - it might have been deleted already
+		if apierrors.IsNotFound(err) {
+			klog.Infof("Node %s not found in cluster (may have been already deleted)", nodeName)
+
+			return nil
+		}
+
+		return fmt.Errorf("failed to delete node %s: %w", nodeName, err)
+	}
+
+	klog.Infof("Successfully deleted node %s from cluster", nodeName)
+
+	return nil
+}
+
 // ShutdownGracefully performs graceful shutdown of the servers.
 func ShutdownGracefully(
 	ctx context.Context,
@@ -290,11 +328,23 @@ func ShutdownGracefully(
 	internalServer *httpserver.InternalServer,
 	publicErrChan <-chan error,
 	internalErrChan <-chan error,
+	nodeName string,
+	kubeClient kubernetes.Interface,
 ) error {
 	klog.Info("Shutting down gracefully...")
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(ctx, config.ShutdownTimeout)
 	defer shutdownCancel()
+
+	// Delete the node from Kubernetes cluster first
+	// This ensures the node is removed even if the pod is forcefully terminated
+	if nodeName != "" && kubeClient != nil {
+		err := DeleteNodeFromCluster(shutdownCtx, nodeName, kubeClient)
+		if err != nil {
+			klog.Errorf("Error deleting node from cluster: %v", err)
+			// Continue with shutdown even if node deletion fails
+		}
+	}
 
 	// Shutdown Internal server
 	if internalServer != nil {
@@ -375,5 +425,7 @@ func Run(ctx context.Context, cfg *config.Config, nodeRunner NodeControllerRunne
 		components.InternalServer,
 		publicErrChan,
 		internalErrChan,
+		cfg.NodeName,
+		components.KubeClient,
 	)
 }

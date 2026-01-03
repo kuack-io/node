@@ -1,3 +1,9 @@
+## [1.2.8](https://github.com/kuack-io/node/compare/1.2.7...1.2.8) (2026-01-03)
+
+### Bug Fixes
+
+* proper shutdown handling ([c10930b](https://github.com/kuack-io/node/commit/c10930b51ee673fada4647aa324976b1fe8ec7d1))
+
 ## [1.2.7](https://github.com/kuack-io/node/compare/1.2.6...1.2.7) (2026-01-03)
 
 ### Dependencies

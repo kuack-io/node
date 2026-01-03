@@ -94,6 +94,14 @@ func SetupComponents(ctx context.Context, cfg *config.Config) (*Components, erro
 		return nil, fmt.Errorf("failed to detect Kubernetes cluster version: %w", err)
 	}
 
+	// Try to detect kuack-node version from the pod spec
+	// This is best-effort and will only work when running as a pod
+	err = wasmProvider.SetVersionFromPod(ctx, kubeClient)
+	if err != nil {
+		klog.Warningf("Failed to detect kuack-node version from pod: %v", err)
+		// Non-fatal, continue without version label
+	}
+
 	// Request TLS certificates from Kubernetes CSR API if not provided
 	certFile := cfg.TLSCertFile
 	keyFile := cfg.TLSKeyFile

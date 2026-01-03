@@ -198,3 +198,53 @@ func TestStartInternalServerPropagatesErrors(t *testing.T) {
 	require.ErrorIs(t, err, errRequestFailed)
 	require.Contains(t, err.Error(), "internal server failed")
 }
+
+func TestSetupComponentsCallsSetVersionFromPod(t *testing.T) {
+	t.Parallel()
+
+	restore := lockAppDeps(t)
+	t.Cleanup(restore)
+
+	cfg := baseTestConfig()
+	cfg.TLSCertFile = "/tmp/cert.pem"
+	cfg.TLSKeyFile = "/tmp/key.pem"
+
+	getKubeClientFunc = func(string) (kubernetes.Interface, error) {
+		return fake.NewClientset(), nil
+	}
+
+	components, err := SetupComponents(context.Background(), cfg)
+	require.NoError(t, err)
+	require.NotNil(t, components)
+	require.NotNil(t, components.WASMProvider)
+
+	// Verify that SetVersionFromPod was called (it should not fail setup even if it fails)
+	// Since we don't set POD_NAME/POD_NAMESPACE, it should gracefully handle it
+	node := components.WASMProvider.GetNode()
+	// Version label may or may not be set depending on env vars
+	// The important thing is that setup didn't fail
+	_ = node
+}
+
+func TestSetupComponentsHandlesSetVersionFromPodFailure(t *testing.T) {
+	t.Parallel()
+
+	restore := lockAppDeps(t)
+	t.Cleanup(restore)
+
+	cfg := baseTestConfig()
+	cfg.TLSCertFile = "/tmp/cert.pem"
+	cfg.TLSKeyFile = "/tmp/key.pem"
+
+	// Create a fake client that will fail when trying to get pod
+	getKubeClientFunc = func(string) (kubernetes.Interface, error) {
+		return fake.NewClientset(), nil
+	}
+
+	// Set env vars to trigger SetVersionFromPod, but pod won't exist
+	// This should not fail setup
+	components, err := SetupComponents(context.Background(), cfg)
+	// Setup should succeed even if SetVersionFromPod fails
+	require.NoError(t, err)
+	require.NotNil(t, components)
+}

@@ -48,6 +48,10 @@ var (
 	ErrNoVersionInfo        = errors.New("unable to determine Kubernetes version: GitVersion, Major, and Minor are all empty")
 	errUnknownAgentPodPhase = errors.New("unknown agent pod phase")
 	errInvalidLogStream     = errors.New("unexpected log stream type")
+
+	// getEnvFunc allows tests to override environment variable lookup.
+	//nolint:gochecknoglobals // package-level seam allows tests to stub env vars without plumbing args
+	getEnvFunc = os.Getenv
 )
 
 const (
@@ -67,6 +71,7 @@ type WASMProvider struct {
 	nodeStatusNotify func(*corev1.Node)
 	startTime        time.Time
 	kubeletVersion   string // Kubernetes cluster version
+	kuackVersion     string // Kuack node image version
 	mu               sync.RWMutex
 }
 
@@ -199,7 +204,7 @@ func NewWASMProvider(nodeName string) (*WASMProvider, error) {
 	klog.Infof("Initializing WASM provider for node: %s", nodeName)
 
 	// Detect node IP from environment (POD_IP) or use service name as fallback
-	nodeIP := os.Getenv("POD_IP")
+	nodeIP := getEnvFunc("POD_IP")
 	if nodeIP == "" {
 		// In Kubernetes, use the service name which will be resolved by DNS
 		nodeIP = "kuack-node.kuack.svc.cluster.local"
@@ -558,8 +563,9 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: p.nodeName,
 			Labels: map[string]string{
-				"kuack.io/node-type":     "kuack-node",
-				"kubernetes.io/hostname": p.nodeName,
+				"kuack.io/node-type":        "kuack-node",
+				"kubernetes.io/hostname":    p.nodeName,
+				"app.kubernetes.io/version": p.kuackVersion,
 			},
 		},
 		Spec: corev1.NodeSpec{
@@ -591,6 +597,63 @@ func (p *WASMProvider) GetNode() *corev1.Node {
 			},
 		},
 	}
+}
+
+// SetVersionFromPod retrieves the running Pod's image tag and sets it as the kuack version.
+func (p *WASMProvider) SetVersionFromPod(ctx context.Context, kubeClient kubernetes.Interface) error {
+	podName := getEnvFunc("POD_NAME")
+	podNamespace := getEnvFunc("POD_NAMESPACE")
+
+	if podName == "" || podNamespace == "" {
+		klog.Warning("POD_NAME or POD_NAMESPACE not set, cannot detect kuack-node version from pod")
+
+		return nil
+	}
+
+	pod, err := kubeClient.CoreV1().Pods(podNamespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get own pod %s/%s: %w", podNamespace, podName, err)
+	}
+
+	// Find the container image
+	var image string
+
+	for _, container := range pod.Spec.Containers {
+		if container.Name == "kuack-node" {
+			image = container.Image
+
+			break
+		}
+	}
+
+	if image == "" && len(pod.Spec.Containers) > 0 {
+		// Fallback to first container
+		image = pod.Spec.Containers[0].Image
+	}
+
+	if image == "" {
+		klog.Warning("Could not find container image in own pod")
+
+		return nil
+	}
+
+	// Extract tag (simple logic: everything after the last colon)
+	// Example: ghcr.io/kuack-io/node:1.2.5 -> 1.2.5
+	// Example: node:latest -> latest
+	parts := strings.Split(image, ":")
+	if len(parts) > 1 {
+		version := parts[len(parts)-1]
+
+		p.mu.Lock()
+		p.kuackVersion = version
+		p.mu.Unlock()
+
+		klog.Infof("Detected kuack-node version from pod image: %s", version)
+	} else {
+		klog.Warningf("Could not extract version tag from image: %s", image)
+	}
+
+	return nil
 }
 
 // SetKubeletVersionFromCluster retrieves the Kubernetes cluster version from the API server

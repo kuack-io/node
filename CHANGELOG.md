@@ -1,3 +1,9 @@
+## [1.2.7](https://github.com/kuack-io/node/compare/1.2.6...1.2.7) (2026-01-03)
+
+### Dependencies
+
+* **deps:** bump github.com/prometheus/client_golang ([d6cd1b3](https://github.com/kuack-io/node/commit/d6cd1b3dd62f74ed1022953858ed92c0ae97bb41))
+
 ## [1.2.6](https://github.com/kuack-io/node/compare/1.2.5...1.2.6) (2026-01-02)
 
 ### Bug Fixes

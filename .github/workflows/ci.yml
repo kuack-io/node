@@ -108,7 +108,7 @@ jobs:
           path: coverage.html
       - name: Check Coverage
         run: |
-          grep "coverage:" test-output.log | awk '/^ok/ {
+          grep "coverage:" test-output.log | grep -v "/testutil" | awk '{
             pkg=$2
             for(i=1;i<=NF;i++) {
               if($i ~ /%/) {

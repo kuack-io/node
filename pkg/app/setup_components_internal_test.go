@@ -7,8 +7,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"kuack-node/pkg/config"
 	httpserver "kuack-node/pkg/http"
@@ -16,9 +20,13 @@ import (
 )
 
 var (
-	depsMu           sync.Mutex                     //nolint:gochecknoglobals // one global lock keeps hook overrides isolated across parallel tests
-	errRequestFailed = errors.New("request failed") //nolint:gochecknoglobals // shared sentinel lets multiple tests assert same error value
-	errProviderBoom  = errors.New("provider boom")
+	depsMu              sync.Mutex                     //nolint:gochecknoglobals // one global lock keeps hook overrides isolated across parallel tests
+	errRequestFailed    = errors.New("request failed") //nolint:gochecknoglobals // shared sentinel lets multiple tests assert same error value
+	errProviderBoom     = errors.New("provider boom")
+	errPublicServer     = errors.New("public server failed")
+	errKubeClient       = errors.New("kube client failed")
+	errSelfSignedFailed = errors.New("self-signed failed")
+	errDeleteFailed     = errors.New("delete failed")
 )
 
 func lockAppDeps(t *testing.T) func() {
@@ -197,4 +205,113 @@ func TestStartInternalServerPropagatesErrors(t *testing.T) {
 	err := <-errChan
 	require.ErrorIs(t, err, errRequestFailed)
 	require.Contains(t, err.Error(), "internal server failed")
+}
+
+func TestSetupComponentsReturnsPublicServerError(t *testing.T) {
+	t.Parallel()
+
+	restore := lockAppDeps(t)
+	t.Cleanup(restore)
+
+	newPublicServerFunc = func(int, string, provider.AgentManager) (*httpserver.PublicServer, error) {
+		return nil, errPublicServer
+	}
+
+	_, err := SetupComponents(context.Background(), baseTestConfig())
+	require.ErrorIs(t, err, errPublicServer)
+	require.Contains(t, err.Error(), "failed to create Public server")
+}
+
+func TestSetupComponentsReturnsKubeClientError(t *testing.T) {
+	t.Parallel()
+
+	restore := lockAppDeps(t)
+	t.Cleanup(restore)
+
+	getKubeClientFunc = func(string) (kubernetes.Interface, error) {
+		return nil, errKubeClient
+	}
+
+	_, err := SetupComponents(context.Background(), baseTestConfig())
+	require.ErrorIs(t, err, errKubeClient)
+	require.Contains(t, err.Error(), "failed to get Kubernetes client")
+}
+
+func TestSetupComponentsReturnsSelfSignedCertError(t *testing.T) {
+	t.Parallel()
+
+	restore := lockAppDeps(t)
+	t.Cleanup(restore)
+
+	cfg := baseTestConfig()
+	cfg.TLSCertFile = ""
+	cfg.TLSKeyFile = ""
+
+	getKubeClientFunc = func(string) (kubernetes.Interface, error) {
+		return fake.NewClientset(), nil
+	}
+
+	getEnvFunc = func(string) string {
+		return ""
+	}
+
+	requestCertificateFunc = func(context.Context, kubernetes.Interface, string, string, string, string) error {
+		return errRequestFailed
+	}
+
+	generateSelfSignedCertFunc = func(string, string, string) error {
+		return errSelfSignedFailed
+	}
+
+	_, err := SetupComponents(context.Background(), cfg)
+	require.ErrorIs(t, err, errSelfSignedFailed)
+	require.Contains(t, err.Error(), "failed to generate self-signed TLS certificate")
+}
+
+func TestDeleteNodeFromClusterNilClient(t *testing.T) {
+	t.Parallel()
+
+	err := DeleteNodeFromCluster(context.Background(), "test-node", nil)
+	require.ErrorIs(t, err, ErrKubeClientRequired)
+}
+
+func TestDeleteNodeFromClusterEmptyNodeName(t *testing.T) {
+	t.Parallel()
+
+	kubeClient := fake.NewClientset()
+	err := DeleteNodeFromCluster(context.Background(), "", kubeClient)
+	require.ErrorIs(t, err, ErrNodeNameRequired)
+}
+
+func TestDeleteNodeFromClusterSuccess(t *testing.T) {
+	t.Parallel()
+
+	kubeClient := fake.NewClientset()
+
+	// Create a node first
+	_, err := kubeClient.CoreV1().Nodes().Create(context.Background(), &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-node-to-delete",
+		},
+	}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	// Delete the node
+	err = DeleteNodeFromCluster(context.Background(), "test-node-to-delete", kubeClient)
+	require.NoError(t, err)
+}
+
+func TestDeleteNodeFromClusterDeleteError(t *testing.T) {
+	t.Parallel()
+
+	kubeClient := fake.NewClientset()
+
+	// Add reactor to simulate error
+	kubeClient.PrependReactor("delete", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errDeleteFailed
+	})
+
+	err := DeleteNodeFromCluster(context.Background(), "test-node", kubeClient)
+	require.ErrorIs(t, err, errDeleteFailed)
+	require.Contains(t, err.Error(), "failed to delete node")
 }

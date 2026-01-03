@@ -424,30 +424,68 @@ func Run(ctx context.Context, cfg *config.Config, nodeRunner NodeControllerRunne
 		nodeRunner = RunNodeController
 	}
 
-	runErr := nodeRunner(ctx, components.WASMProvider, components.KubeClient)
-	// When the Pod is terminated, ctx is canceled via SIGTERM handling in main().
-	// Treat that as a normal stop condition so we still run cleanup.
-	if runErr != nil && errors.Is(runErr, context.Canceled) {
-		runErr = nil
+	runErrCh := make(chan error, 1)
+
+	go func() {
+		runErrCh <- nodeRunner(ctx, components.WASMProvider, components.KubeClient)
+	}()
+
+	// Important: on SIGTERM, ctx is canceled. We must run cleanup immediately (delete Node, stop servers)
+	// and not wait for the virtual-kubelet node controller to return (it may block past the Pod's grace period).
+	select {
+	case runErr := <-runErrCh:
+		// Treat context cancellation as a normal stop condition.
+		if runErr != nil && errors.Is(runErr, context.Canceled) {
+			runErr = nil
+		}
+
+		shutdownErr := ShutdownGracefully(
+			ctx,
+			components.PublicServer,
+			components.InternalServer,
+			publicErrChan,
+			internalErrChan,
+			cfg.NodeName,
+			components.KubeClient,
+		)
+
+		if runErr != nil && shutdownErr != nil {
+			return fmt.Errorf("%w; shutdown error: %w", runErr, shutdownErr)
+		}
+
+		if runErr != nil {
+			return runErr
+		}
+
+		return shutdownErr
+
+	case <-ctx.Done():
+		// SIGTERM / cancellation path: do best-effort cleanup right away.
+		klog.Infof("Context canceled, initiating shutdown cleanup (delete node + stop servers)")
+
+		shutdownErr := ShutdownGracefully(
+			ctx,
+			components.PublicServer,
+			components.InternalServer,
+			publicErrChan,
+			internalErrChan,
+			cfg.NodeName,
+			components.KubeClient,
+		)
+
+		// Best-effort: if the node controller already returned with a non-cancel error, surface it.
+		select {
+		case runErr := <-runErrCh:
+			if runErr != nil && !errors.Is(runErr, context.Canceled) {
+				if shutdownErr != nil {
+					return fmt.Errorf("%w; shutdown error: %w", runErr, shutdownErr)
+				}
+
+				return runErr
+			}
+		default:
+		}
+
+		return shutdownErr
 	}
-
-	shutdownErr := ShutdownGracefully(
-		ctx,
-		components.PublicServer,
-		components.InternalServer,
-		publicErrChan,
-		internalErrChan,
-		cfg.NodeName,
-		components.KubeClient,
-	)
-
-	if runErr != nil && shutdownErr != nil {
-		return fmt.Errorf("%w; shutdown error: %w", runErr, shutdownErr)
-	}
-
-	if runErr != nil {
-		return runErr
-	}
-
-	return shutdownErr
 }

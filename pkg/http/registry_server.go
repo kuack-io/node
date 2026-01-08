@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/google/go-containerregistry/pkg/v1"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 
 	"kuack-node/pkg/registry"
 	"kuack-node/pkg/server"
@@ -23,9 +23,7 @@ type RegistryServer struct {
 }
 
 // NewRegistryServer creates a new registry server.
-func NewRegistryServer(port int) *RegistryServer {
-	proxy := registry.NewProxy()
-
+func NewRegistryServer(port int, proxy *registry.Proxy) *RegistryServer {
 	mux := http.NewServeMux()
 	mux.Handle("/", proxy)
 

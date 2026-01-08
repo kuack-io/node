@@ -4,10 +4,11 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/google/go-containerregistry/pkg/v1"
-
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 	"kuack-node/pkg/server"
+
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 // PublicServer handles public-facing traffic (Agents and Registry).
@@ -20,7 +21,7 @@ type PublicServer struct {
 }
 
 // NewPublicServer creates a new PublicServer.
-func NewPublicServer(port int, token string, provider provider.AgentManager) (*PublicServer, error) {
+func NewPublicServer(port int, token string, provider provider.AgentManager, proxy *registry.Proxy) (*PublicServer, error) {
 	mux := http.NewServeMux()
 
 	// Initialize sub-servers
@@ -39,7 +40,7 @@ func NewPublicServer(port int, token string, provider provider.AgentManager) (*P
 	}
 
 	// Registry Server Logic
-	registryServer := NewRegistryServer(0) // Port not used
+	registryServer := NewRegistryServer(0, proxy) // Port not used
 
 	// Register Routes
 	// 1. / -> Agent WebSocket

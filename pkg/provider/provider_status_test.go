@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -19,7 +20,7 @@ import (
 func TestWASMProvider_GetPodStatus(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
 	require.NoError(t, err)
 
 	// 1. Add a pod
@@ -52,7 +53,7 @@ func TestWASMProvider_GetPodStatus(t *testing.T) {
 func TestWASMProvider_GetPods(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
 	require.NoError(t, err)
 
 	// 1. Add pods
@@ -88,7 +89,7 @@ func TestWASMProvider_GetPods(t *testing.T) {
 func TestWASMProvider_GetNode(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
 	require.NoError(t, err)
 
 	// Set kubelet version (required before GetNode())
@@ -131,7 +132,7 @@ func TestWASMProvider_GetNode(t *testing.T) {
 func TestWASMProvider_NotifyNodeStatus(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
 	require.NoError(t, err)
 
 	// Set kubelet version (required before GetNode())

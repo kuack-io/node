@@ -16,6 +16,7 @@ import (
 	"kuack-node/pkg/config"
 	kuackhttp "kuack-node/pkg/http"
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 	tlsutil "kuack-node/pkg/tls"
 
 	"k8s.io/client-go/kubernetes"
@@ -145,11 +146,11 @@ func TestStartPublicServerAndShutdown(t *testing.T) {
 	t.Cleanup(restore)
 
 	// Setup
-	p, err := provider.NewWASMProvider("test-node")
+	p, err := provider.NewWASMProvider("test-node", registry.NewProxy())
 	require.NoError(t, err)
 
 	// Use port 0 for random port
-	server, err := kuackhttp.NewPublicServer(0, "test-token", p)
+	server, err := kuackhttp.NewPublicServer(0, "test-token", p, registry.NewProxy())
 	require.NoError(t, err)
 
 	ctx := t.Context()
@@ -180,7 +181,7 @@ func TestStartInternalServerAndShutdown(t *testing.T) {
 	t.Cleanup(restore)
 
 	// Setup
-	p, err := provider.NewWASMProvider("test-node")
+	p, err := provider.NewWASMProvider("test-node", registry.NewProxy())
 	require.NoError(t, err)
 
 	// Use port 0 for random port

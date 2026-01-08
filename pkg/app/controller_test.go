@@ -8,7 +8,9 @@ import (
 
 	"kuack-node/pkg/app"
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
@@ -19,7 +21,10 @@ func TestRunNodeController(t *testing.T) {
 	t.Parallel()
 
 	// Setup
-	p, err := provider.NewWASMProvider("test-node")
+	// MockResolver
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("test-node", mockResolver)
 	require.NoError(t, err)
 
 	kubeClient := fake.NewClientset()
@@ -76,4 +81,23 @@ func TestRunNodeController(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		require.Fail(t, "RunNodeController did not return after context cancellation")
 	}
+}
+
+type MockResolver struct {
+	mock.Mock
+}
+
+func (m *MockResolver) ResolveWasmConfig(ctx context.Context, imageRef string) (*registry.WasmConfig, error) {
+	args := m.Called(ctx, imageRef)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	cfg, ok := args.Get(0).(*registry.WasmConfig)
+	if !ok {
+		// This should not happen in tests unless mock is set up incorrectly
+		panic("mock argument 0 is not *registry.WasmConfig")
+	}
+
+	return cfg, args.Error(1)
 }

@@ -8,8 +8,9 @@ import (
 	"testing"
 
 	kuackhttp "kuack-node/pkg/http"
+	"kuack-node/pkg/registry"
 
-	"github.com/google/go-containerregistry/pkg/v1"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +18,7 @@ import (
 func TestRegistryServer(t *testing.T) {
 	t.Parallel()
 
-	server := kuackhttp.NewRegistryServer(0)
+	server := kuackhttp.NewRegistryServer(0, registry.NewProxy())
 	server.SetFetchArtifact(func(ctx context.Context, ref, artifactPath string, _ *v1.Platform) ([]byte, error) {
 		assert.Equal(t, "demo:latest", ref)
 		assert.Equal(t, "file.txt", artifactPath)

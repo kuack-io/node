@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -30,10 +31,36 @@ func (m *MockAgentStream) WriteJSON(v any) error {
 	return args.Error(0)
 }
 
+type MockResolver struct {
+	mock.Mock
+}
+
+func (m *MockResolver) ResolveWasmConfig(ctx context.Context, imageRef string) (*registry.WasmConfig, error) {
+	args := m.Called(ctx, imageRef)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+
+	cfg, ok := args.Get(0).(*registry.WasmConfig)
+	if !ok {
+		// This should not happen in tests unless mock is set up incorrectly
+		panic("mock argument 0 is not *registry.WasmConfig")
+	}
+
+	return cfg, args.Error(1)
+}
+
 func setupTestProvider(t *testing.T) (*provider.WASMProvider, *MockAgentStream, *provider.AgentConnection) {
 	t.Helper()
 
-	p, err := provider.NewWASMProvider("node-1")
+	// Use MockResolver by default
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{
+		Type: "wasi",
+		Path: "/test.wasm",
+	}, nil)
+
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	// Set kubelet version using a fake Kubernetes client

@@ -11,7 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"kuack-node/pkg/registry"
+
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
+
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -57,9 +60,11 @@ const (
 
 // WASMProvider implements the virtual-kubelet provider interface for browser-based WASM agents.
 type WASMProvider struct {
-	nodeName         string
-	nodeIP           string // Pod IP or service DNS name
-	agentRegistry    *AgentRegistry
+	nodeName      string
+	nodeIP        string // Pod IP or service DNS name
+	agentRegistry *AgentRegistry
+	// registryResolver resolves WASM configuration from images.
+	registryResolver registry.Resolver
 	pods             sync.Map // namespace/name -> *corev1.Pod
 	podLogs          sync.Map // namespace/name -> *PodLogStream
 	resources        *ResourceTracker
@@ -195,7 +200,7 @@ func (s *PodLogStream) RemoveListener(l *LogListener) {
 }
 
 // NewWASMProvider creates a new WASM provider instance.
-func NewWASMProvider(nodeName string) (*WASMProvider, error) {
+func NewWASMProvider(nodeName string, registryResolver registry.Resolver) (*WASMProvider, error) {
 	klog.Infof("Initializing WASM provider for node: %s", nodeName)
 
 	// Detect node IP from environment (POD_IP) or use service name as fallback
@@ -209,12 +214,13 @@ func NewWASMProvider(nodeName string) (*WASMProvider, error) {
 	}
 
 	return &WASMProvider{
-		nodeName:       nodeName,
-		nodeIP:         nodeIP,
-		agentRegistry:  NewAgentRegistry(),
-		resources:      NewResourceTracker(),
-		startTime:      time.Now(),
-		kubeletVersion: "", // Must be set via SetKubeletVersionFromCluster
+		nodeName:         nodeName,
+		nodeIP:           nodeIP,
+		agentRegistry:    NewAgentRegistry(),
+		registryResolver: registryResolver,
+		resources:        NewResourceTracker(),
+		startTime:        time.Now(),
+		kubeletVersion:   "", // Must be set via SetKubeletVersionFromCluster
 	}, nil
 }
 
@@ -285,7 +291,7 @@ func (p *WASMProvider) CreatePod(ctx context.Context, pod *corev1.Pod) error {
 	agent.mu.Unlock()
 
 	// Send pod specification to agent via WebSocket
-	err = p.sendPodToAgent(agent, pod)
+	err = p.sendPodToAgent(ctx, agent, pod)
 	if err != nil {
 		// Remove from agent allocation on send failure
 		agent.mu.Lock()
@@ -720,6 +726,7 @@ type AgentContainerSpec struct {
 		Value string `json:"value"`
 	} `json:"env,omitempty"`
 	Wasm *struct {
+		Type    string `json:"type,omitempty"`
 		Path    string `json:"path,omitempty"`
 		Variant string `json:"variant,omitempty"`
 		Image   string `json:"image,omitempty"`
@@ -730,61 +737,6 @@ type AgentContainerSpec struct {
 type AgentPodStatus struct {
 	Phase   string `json:"phase"`
 	Message string `json:"message"`
-}
-
-// convertPodToAgentSpec converts a Kubernetes Pod to the agent's PodSpec format.
-func convertPodToAgentSpec(pod *corev1.Pod) (*AgentPodSpec, error) {
-	if len(pod.Spec.Containers) == 0 {
-		return nil, ErrPodHasNoContainers
-	}
-
-	agentSpec := &AgentPodSpec{}
-	agentSpec.Metadata.Name = pod.Name
-	agentSpec.Metadata.Namespace = pod.Namespace
-
-	agentSpec.Spec.Containers = make([]AgentContainerSpec, 0, len(pod.Spec.Containers))
-
-	for _, container := range pod.Spec.Containers {
-		agentContainer := AgentContainerSpec{
-			Name:    container.Name,
-			Image:   container.Image,
-			Command: container.Command,
-			Args:    container.Args,
-		}
-
-		// Convert environment variables
-		if len(container.Env) > 0 {
-			agentContainer.Env = make([]struct {
-				Name  string `json:"name"`
-				Value string `json:"value"`
-			}, 0, len(container.Env))
-
-			for _, env := range container.Env {
-				envEntry := struct {
-					Name  string `json:"name"`
-					Value string `json:"value"`
-				}{
-					Name:  env.Name,
-					Value: env.Value,
-				}
-				agentContainer.Env = append(agentContainer.Env, envEntry)
-			}
-		}
-
-		// Always set WASM variant to wasm32/wasi for all workloads
-		// This assumes all WASM images are packaged with wasm-pack in the standard format
-		agentContainer.Wasm = &struct {
-			Path    string `json:"path,omitempty"`
-			Variant string `json:"variant,omitempty"`
-			Image   string `json:"image,omitempty"`
-		}{
-			Variant: "wasm32/wasi",
-		}
-
-		agentSpec.Spec.Containers = append(agentSpec.Spec.Containers, agentContainer)
-	}
-
-	return agentSpec, nil
 }
 
 // UpdatePodStatus applies a status update coming from a browser agent.
@@ -835,6 +787,84 @@ func (p *WASMProvider) getKubeletVersion() string {
 	}
 
 	return p.kubeletVersion
+}
+
+// convertPodToAgentSpec converts a Kubernetes Pod to the agent's PodSpec format.
+func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Pod) (*AgentPodSpec, error) {
+	if len(pod.Spec.Containers) == 0 {
+		return nil, ErrPodHasNoContainers
+	}
+
+	agentSpec := &AgentPodSpec{}
+	agentSpec.Metadata.Name = pod.Name
+	agentSpec.Metadata.Namespace = pod.Namespace
+
+	agentSpec.Spec.Containers = make([]AgentContainerSpec, 0, len(pod.Spec.Containers))
+
+	for _, container := range pod.Spec.Containers {
+		agentContainer := AgentContainerSpec{
+			Name:    container.Name,
+			Image:   container.Image,
+			Command: container.Command,
+			Args:    container.Args,
+		}
+
+		// Convert environment variables
+		if len(container.Env) > 0 {
+			agentContainer.Env = make([]struct {
+				Name  string `json:"name"`
+				Value string `json:"value"`
+			}, 0, len(container.Env))
+
+			for _, env := range container.Env {
+				envEntry := struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				}{
+					Name:  env.Name,
+					Value: env.Value,
+				}
+				agentContainer.Env = append(agentContainer.Env, envEntry)
+			}
+		}
+
+		// Resolve WASM configuration using registry inspector
+		wasmConfig, err := p.registryResolver.ResolveWasmConfig(ctx, container.Image)
+		if err != nil {
+			// Fallback if inspection fails
+			klog.Warningf("Failed to resolve WASM config for %s: %v. Falling back to default WASI.", container.Image, err)
+
+			wasmConfig = &registry.WasmConfig{
+				Type:    "wasi",
+				Path:    "/output.wasm",
+				Variant: "wasm32/wasi",
+			}
+		}
+
+		// Support annotation overrides if present
+		if typeOverride, ok := pod.Annotations["kuack.io/wasm-type"]; ok {
+			wasmConfig.Type = typeOverride
+		}
+
+		if pathOverride, ok := pod.Annotations["kuack.io/wasm-path"]; ok {
+			wasmConfig.Path = pathOverride
+		}
+
+		agentContainer.Wasm = &struct {
+			Type    string `json:"type,omitempty"`
+			Path    string `json:"path,omitempty"`
+			Variant string `json:"variant,omitempty"`
+			Image   string `json:"image,omitempty"`
+		}{
+			Type:    wasmConfig.Type,
+			Path:    wasmConfig.Path,
+			Variant: wasmConfig.Variant,
+		}
+
+		agentSpec.Spec.Containers = append(agentSpec.Spec.Containers, agentContainer)
+	}
+
+	return agentSpec, nil
 }
 
 func agentPhaseFromString(phase string) (corev1.PodPhase, error) {
@@ -1019,6 +1049,9 @@ func (p *WASMProvider) releasePodAllocation(podKey string) {
 			agent.mu.Unlock()
 			klog.V(logVerboseLevel).Infof("Released pod %s from agent %s", podKey, agent.UUID)
 
+			// Try to assign pending pods to this agent since capacity has been released
+			go p.assignPendingPodsToAgent(context.Background(), agent)
+
 			return false
 		}
 
@@ -1151,11 +1184,11 @@ func ptrTo[T any](value T) *T {
 	return &value
 }
 
-func (p *WASMProvider) sendPodToAgent(agent *AgentConnection, pod *corev1.Pod) error {
+func (p *WASMProvider) sendPodToAgent(ctx context.Context, agent *AgentConnection, pod *corev1.Pod) error {
 	klog.V(logVerboseLevel).Infof("Sending pod %s to agent %s", getPodKey(pod), agent.UUID)
 
 	// Convert pod to agent format
-	agentSpec, err := convertPodToAgentSpec(pod)
+	agentSpec, err := p.convertPodToAgentSpec(ctx, pod)
 	if err != nil {
 		return err
 	}

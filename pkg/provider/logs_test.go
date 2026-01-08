@@ -8,9 +8,13 @@ import (
 
 	"kuack-node/pkg/provider"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"kuack-node/pkg/registry"
+
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPodLogStream_WriteAndRead_NoFollow(t *testing.T) {
@@ -74,7 +78,9 @@ func TestPodLogStream_WriteAndRead_Follow(t *testing.T) {
 func TestWASMProvider_GetContainerLogs(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	// 1. Get logs (follow=true)

@@ -8,8 +8,9 @@ import (
 	"testing"
 
 	kuackhttp "kuack-node/pkg/http"
+	"kuack-node/pkg/registry"
 
-	"github.com/google/go-containerregistry/pkg/v1"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +19,7 @@ func TestPublicServer(t *testing.T) {
 	t.Parallel()
 
 	mockProvider := new(kuackhttp.MockAgentManager)
-	server, err := kuackhttp.NewPublicServer(0, "test-token", mockProvider)
+	server, err := kuackhttp.NewPublicServer(0, "test-token", mockProvider, registry.NewProxy())
 	require.NoError(t, err)
 	server.SetRegistryFetchArtifact(func(ctx context.Context, ref, artifactPath string, _ *v1.Platform) ([]byte, error) {
 		assert.Equal(t, "demo:latest", ref)

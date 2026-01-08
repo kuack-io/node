@@ -6,8 +6,10 @@ import (
 	"time"
 
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -17,7 +19,9 @@ import (
 func TestProvider_CreatePod_NoAgent(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	pod := &corev1.Pod{
@@ -63,7 +67,9 @@ func TestProvider_CreatePod_AlreadyExists(t *testing.T) {
 func TestProvider_DeletePod_NotFound(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	pod := &corev1.Pod{
@@ -78,7 +84,9 @@ func TestProvider_DeletePod_NotFound(t *testing.T) {
 func TestProvider_GetPod_NotFound(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	_, err = p.GetPod(context.Background(), "default", "missing")
@@ -88,7 +96,9 @@ func TestProvider_GetPod_NotFound(t *testing.T) {
 func TestProvider_GetPodStatus_NotFound(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	_, err = p.GetPodStatus(context.Background(), "default", "missing")
@@ -128,7 +138,9 @@ func TestProvider_GetPods(t *testing.T) {
 func TestProvider_GetNode(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	// Set kubelet version (required before GetNode())
@@ -144,7 +156,9 @@ func TestProvider_GetNode(t *testing.T) {
 func TestProvider_NotifyNodeStatus(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	// Set kubelet version (required before GetNode())

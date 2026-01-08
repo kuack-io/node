@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"kuack-node/pkg/provider"
+	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -19,7 +20,10 @@ import (
 func TestWASMProvider_UpdatePodStatus(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	// Use MockResolver
+	mockResolver := new(MockResolver)
+	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
+	p, err := provider.NewWASMProvider("node-1", mockResolver)
 	require.NoError(t, err)
 
 	// 1. Setup agent and pod
@@ -101,7 +105,7 @@ func TestWASMProvider_UpdatePodStatus(t *testing.T) {
 func TestWASMProvider_UpdatePodStatus_NotFound(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
 	require.NoError(t, err)
 
 	status := provider.AgentPodStatus{Phase: "Running"}
@@ -112,7 +116,7 @@ func TestWASMProvider_UpdatePodStatus_NotFound(t *testing.T) {
 func TestWASMProvider_UpdatePodStatus_InvalidPhase(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1")
+	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
 	require.NoError(t, err)
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "default"}}

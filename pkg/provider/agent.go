@@ -111,7 +111,7 @@ func (p *WASMProvider) assignPendingPodsToAgent(ctx context.Context, agent *Agen
 		agent.mu.Unlock()
 
 		// Send pod specification to agent via WebSocket
-		err := p.sendPodToAgent(agent, pod)
+		err := p.sendPodToAgent(ctx, agent, pod)
 		if err != nil {
 			// Remove from agent allocation on send failure
 			agent.mu.Lock()

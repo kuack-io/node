@@ -1,3 +1,9 @@
+## [1.3.0](https://github.com/kuack-io/node/compare/1.2.8...1.3.0) (2026-01-08)
+
+### Features
+
+* new contract mode for agent (c2w support) ([2bf5be1](https://github.com/kuack-io/node/commit/2bf5be19d129ca2876ad519ad101b1b1b0b9bb52))
+
 ## [1.2.8](https://github.com/kuack-io/node/compare/1.2.7...1.2.8) (2026-01-03)
 
 ### Bug Fixes

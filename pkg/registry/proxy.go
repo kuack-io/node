@@ -378,7 +378,7 @@ func extractFromLayer(reader io.Reader, target string, deleted map[string]struct
 		// Check for exact match
 		if header.FileInfo().Mode().IsRegular() && headerPath == target {
 			// Limit file size to avoid OOM
-			const maxFileSize = 100 * 1024 * 1024 // 100MB
+			const maxFileSize = 512 * 1024 * 1024 // 512MB
 			if header.FileInfo().Size() > maxFileSize {
 				return nil, fmt.Errorf("%w: %d bytes", errFileTooLarge, header.FileInfo().Size())
 			}

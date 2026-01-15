@@ -1,3 +1,9 @@
+## [1.3.1](https://github.com/kuack-io/node/compare/1.3.0...1.3.1) (2026-01-15)
+
+### Bug Fixes
+
+* increase size limit ([06a7ae2](https://github.com/kuack-io/node/commit/06a7ae2a9a4b7e5c7d9db91f775f4e314487eff4))
+
 ## [1.3.0](https://github.com/kuack-io/node/compare/1.2.8...1.3.0) (2026-01-08)
 
 ### Features

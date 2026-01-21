@@ -36,6 +36,8 @@ const (
 	writeTimeout = 10 * time.Second
 	// logListenerBufferSize is the buffered channel size for log listeners.
 	logListenerBufferSize = 100
+	// registryResolveTimeout is the timeout for resolving WASM config from the registry.
+	registryResolveTimeout = 5 * time.Second
 )
 
 var (
@@ -811,9 +813,11 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 
 		// Resolve WASM configuration using registry inspector.
 		// Use a short 5s timeout to avoid blocking pod scheduling if registry is slow.
-		resolveCtx, resolveCancel := context.WithTimeout(ctx, 5*time.Second)
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, registryResolveTimeout)
 		wasmConfig, err := p.registryResolver.ResolveWasmConfig(resolveCtx, container.Image)
+
 		resolveCancel()
+
 		if err != nil {
 			// Fallback if inspection fails
 			klog.Warningf("Failed to resolve WASM config for %s: %v. Falling back to default WASI.", container.Image, err)

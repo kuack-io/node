@@ -30,6 +30,13 @@ const (
 	variantSplitParts   = 2
 	// logVerboseLevel is the klog verbosity level for verbose debug logs.
 	logVerboseLevel = 4
+
+	// Transport timeout configuration for large WASM artifacts.
+	transportDialTimeout           = 60 * time.Second
+	transportKeepAlive             = 30 * time.Second
+	transportResponseHeaderTimeout = 60 * time.Second
+	transportIdleConnTimeout       = 60 * time.Second
+	transportTLSHandshakeTimeout   = 60 * time.Second
 )
 
 var (
@@ -58,14 +65,19 @@ type cachedArtifact struct {
 // NewProxy creates a new registry proxy instance.
 func NewProxy() *Proxy {
 	// Clone the default transport to customize timeouts for large WASM artifacts
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		panic("http.DefaultTransport is not *http.Transport")
+	}
+
+	transport := defaultTransport.Clone()
 	transport.DialContext = (&net.Dialer{
-		Timeout:   60 * time.Second,
-		KeepAlive: 30 * time.Second,
+		Timeout:   transportDialTimeout,
+		KeepAlive: transportKeepAlive,
 	}).DialContext
-	transport.ResponseHeaderTimeout = 60 * time.Second
-	transport.IdleConnTimeout = 60 * time.Second
-	transport.TLSHandshakeTimeout = 60 * time.Second
+	transport.ResponseHeaderTimeout = transportResponseHeaderTimeout
+	transport.IdleConnTimeout = transportIdleConnTimeout
+	transport.TLSHandshakeTimeout = transportTLSHandshakeTimeout
 
 	p := &Proxy{
 		imageFetcher: remote.Image,

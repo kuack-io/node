@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"path"
 	"path/filepath"
@@ -45,6 +46,7 @@ type Proxy struct {
 	cache         sync.Map
 	fetchArtifact func(ctx context.Context, ref, artifactPath string, platform *v1.Platform) ([]byte, error)
 	imageFetcher  func(ref name.Reference, options ...remote.Option) (v1.Image, error)
+	transport     http.RoundTripper
 }
 
 type cachedArtifact struct {
@@ -55,8 +57,19 @@ type cachedArtifact struct {
 
 // NewProxy creates a new registry proxy instance.
 func NewProxy() *Proxy {
+	// Clone the default transport to customize timeouts for large WASM artifacts
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{
+		Timeout:   60 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.ResponseHeaderTimeout = 60 * time.Second
+	transport.IdleConnTimeout = 60 * time.Second
+	transport.TLSHandshakeTimeout = 60 * time.Second
+
 	p := &Proxy{
 		imageFetcher: remote.Image,
+		transport:    transport,
 	}
 	p.fetchArtifact = p.fetchArtifactFromRegistry
 
@@ -427,6 +440,7 @@ func (p *Proxy) fetchArtifactFromRegistry(
 	opts := []remote.Option{
 		remote.WithContext(ctx),
 		remote.WithUserAgent(registryUserAgent),
+		remote.WithTransport(p.transport),
 	}
 
 	if platform != nil {

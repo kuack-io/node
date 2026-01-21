@@ -809,27 +809,11 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 			Args:    container.Args,
 		}
 
-		// Convert environment variables
-		if len(container.Env) > 0 {
-			agentContainer.Env = make([]struct {
-				Name  string `json:"name"`
-				Value string `json:"value"`
-			}, 0, len(container.Env))
-
-			for _, env := range container.Env {
-				envEntry := struct {
-					Name  string `json:"name"`
-					Value string `json:"value"`
-				}{
-					Name:  env.Name,
-					Value: env.Value,
-				}
-				agentContainer.Env = append(agentContainer.Env, envEntry)
-			}
-		}
-
-		// Resolve WASM configuration using registry inspector
-		wasmConfig, err := p.registryResolver.ResolveWasmConfig(ctx, container.Image)
+		// Resolve WASM configuration using registry inspector.
+		// Use a short 5s timeout to avoid blocking pod scheduling if registry is slow.
+		resolveCtx, resolveCancel := context.WithTimeout(ctx, 5*time.Second)
+		wasmConfig, err := p.registryResolver.ResolveWasmConfig(resolveCtx, container.Image)
+		resolveCancel()
 		if err != nil {
 			// Fallback if inspection fails
 			klog.Warningf("Failed to resolve WASM config for %s: %v. Falling back to default WASI.", container.Image, err)
@@ -839,7 +823,50 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 				Path:    "/output.wasm",
 				Variant: "wasm32/wasi",
 			}
+		} else {
+			klog.Infof("Resolved WASM config for %s: %+v", container.Image, wasmConfig)
 		}
+
+		// Convert environment variables
+		// We merge "Image Env" (from the container image config) with "Pod Env" (from Kubernetes spec).
+		// This is critical for language runtimes (like Python) that rely on environment variables
+		// defined in the Dockerfile (e.g., PYTHONHOME) which are otherwise lost in the WASM translation.
+		//
+		// Precedence: Pod Env overrides Image Env.
+		var envVars []struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+
+		// Add Image Environment Variables (Base)
+		const keyValueParts = 2
+		for _, envStr := range wasmConfig.Env {
+			parts := strings.SplitN(envStr, "=", keyValueParts)
+			if len(parts) == keyValueParts {
+				envVars = append(envVars, struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				}{
+					Name:  parts[0],
+					Value: parts[1],
+				})
+			}
+		}
+
+		// Add/Override with Pod Environment Variables
+		if len(container.Env) > 0 {
+			for _, env := range container.Env {
+				envVars = append(envVars, struct {
+					Name  string `json:"name"`
+					Value string `json:"value"`
+				}{
+					Name:  env.Name,
+					Value: env.Value,
+				})
+			}
+		}
+
+		agentContainer.Env = envVars
 
 		// Support annotation overrides if present
 		if typeOverride, ok := pod.Annotations["kuack.io/wasm-type"]; ok {

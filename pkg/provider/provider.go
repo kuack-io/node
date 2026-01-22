@@ -805,10 +805,8 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 
 	for _, container := range pod.Spec.Containers {
 		agentContainer := AgentContainerSpec{
-			Name:    container.Name,
-			Image:   container.Image,
-			Command: container.Command,
-			Args:    container.Args,
+			Name:  container.Name,
+			Image: container.Image,
 		}
 
 		// Resolve WASM configuration using registry inspector.
@@ -830,6 +828,28 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 		} else {
 			klog.Infof("Resolved WASM config for %s: %+v", container.Image, wasmConfig)
 		}
+
+		// Compute effective Command and Args following Docker/Kubernetes semantics:
+		// - If pod.command is set -> use it (overrides image Entrypoint)
+		// - If pod.command is NOT set -> use image Entrypoint
+		// - If pod.args is set -> use it (overrides image Cmd)
+		// - If pod.args is NOT set -> use image Cmd
+		effectiveCommand := container.Command
+		if len(effectiveCommand) == 0 && wasmConfig != nil {
+			effectiveCommand = wasmConfig.Entrypoint
+		}
+
+		effectiveArgs := container.Args
+		if len(effectiveArgs) == 0 && wasmConfig != nil && len(container.Command) == 0 {
+			// Only use image Cmd if neither pod command nor pod args are specified
+			effectiveArgs = wasmConfig.Cmd
+		}
+
+		const logVerboseLevel = 4
+		klog.V(logVerboseLevel).Infof("[Provider] Container %s: effectiveCommand=%v, effectiveArgs=%v", container.Name, effectiveCommand, effectiveArgs)
+
+		agentContainer.Command = effectiveCommand
+		agentContainer.Args = effectiveArgs
 
 		// Convert environment variables
 		// We merge "Image Env" (from the container image config) with "Pod Env" (from Kubernetes spec).

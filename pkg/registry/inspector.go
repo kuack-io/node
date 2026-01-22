@@ -17,10 +17,12 @@ import (
 
 // WasmConfig describes how to execute a WASM image.
 type WasmConfig struct {
-	Type    string   `json:"type"` // "bindgen" or "wasi"
-	Path    string   `json:"path"`
-	Variant string   `json:"variant"` // defaults to "wasm32/wasi"
-	Env     []string `json:"env,omitempty"`
+	Type       string   `json:"type"` // "bindgen" or "wasi"
+	Path       string   `json:"path"`
+	Variant    string   `json:"variant"` // defaults to "wasm32/wasi"
+	Env        []string `json:"env,omitempty"`
+	Entrypoint []string `json:"entrypoint,omitempty"` // Image's default entrypoint
+	Cmd        []string `json:"cmd,omitempty"`        // Image's default command
 }
 
 // Resolver resolves WASM configuration for an image.
@@ -56,9 +58,19 @@ func (p *Proxy) ResolveWasmConfig(ctx context.Context, imageRef string) (*WasmCo
 		klog.Warningf("[Registry] Failed to fetch config file for %s: %v", imageRef, err)
 	}
 
-	var imageEnv []string
+	var (
+		imageEnv        []string
+		imageEntrypoint []string
+		imageCmd        []string
+	)
+
 	if configFile != nil {
 		imageEnv = configFile.Config.Env
+		imageEntrypoint = configFile.Config.Entrypoint
+		imageCmd = configFile.Config.Cmd
+
+		const logVerboseLevel = 4
+		klog.V(logVerboseLevel).Infof("[Registry] Image config for %s: Entrypoint=%v, Cmd=%v", imageRef, imageEntrypoint, imageCmd)
 	}
 
 	// Check for wasm-pack structure (pkg/package.json)
@@ -73,15 +85,17 @@ func (p *Proxy) ResolveWasmConfig(ctx context.Context, imageRef string) (*WasmCo
 	if found {
 		klog.Infof("[Registry] Detected bindgen layout for %s: %+v", imageRef, config)
 		config.Env = imageEnv
+		config.Entrypoint = imageEntrypoint
+		config.Cmd = imageCmd
 
 		return config, nil
 	}
 
 	// Check for common container2wasm / standalone WASM files
-	return p.inspectImageContent(img, imageRef, imageEnv)
+	return p.inspectImageContent(img, imageRef, imageEnv, imageEntrypoint, imageCmd)
 }
 
-func (p *Proxy) inspectImageContent(img v1.Image, imageRef string, env []string) (*WasmConfig, error) {
+func (p *Proxy) inspectImageContent(img v1.Image, imageRef string, env, entrypoint, cmd []string) (*WasmConfig, error) {
 	layers, err := img.Layers()
 	if err != nil {
 		return nil, err
@@ -93,10 +107,12 @@ func (p *Proxy) inspectImageContent(img v1.Image, imageRef string, env []string)
 
 	// Default fallback
 	bestGuess := &WasmConfig{
-		Type:    "wasi",
-		Path:    "/output.wasm", // Standard c2w output
-		Variant: "wasm32/wasi",
-		Env:     env,
+		Type:       "wasi",
+		Path:       "/output.wasm", // Standard c2w output
+		Variant:    "wasm32/wasi",
+		Env:        env,
+		Entrypoint: entrypoint,
+		Cmd:        cmd,
 	}
 
 	// Derive name from image ref for fallback detection (e.g. "checker" from "kuack/checker")

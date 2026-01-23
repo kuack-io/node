@@ -31,3 +31,15 @@ The application reads configuration from environment variables:
 The application communicates with browser-based agents using HTTP (for initial connection and health checks) and WebSocket (for agent registration and pod management).
 
 TLS termination should be handled at the ingress controller level. The application serves plain HTTP and expects to be behind an ingress that terminates TLS.
+
+## Known Limitations
+
+### Browser WASI Shim IOV_MAX (1024)
+
+The browser WASI shim (`browser_wasi_shim`) has a hardcoded limit of 1024 iovec
+structures. This affects WASI initialization when there are many environment
+variables. The provider filters out Kubernetes service discovery env vars
+(auto-injected by Kubernetes) to stay under this limit.
+
+If you encounter "too many write (1025 > 1024)" errors, reduce environment
+variables in your container image.

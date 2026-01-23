@@ -1,3 +1,9 @@
+## [1.3.2](https://github.com/kuack-io/node/compare/1.3.1...1.3.2) (2026-01-23)
+
+### Bug Fixes
+
+* trying to fix the registry ([22725b9](https://github.com/kuack-io/node/commit/22725b98256218a6d7dcfdc87381558fe54a3e9b))
+
 ## [1.3.1](https://github.com/kuack-io/node/compare/1.3.0...1.3.1) (2026-01-15)
 
 ### Bug Fixes

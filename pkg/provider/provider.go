@@ -40,6 +40,26 @@ const (
 	registryResolveTimeout = 5 * time.Second
 )
 
+// isKubernetesServiceEnv checks if an environment variable name matches Kubernetes
+// service discovery patterns. These are automatically injected by Kubernetes and
+// are not needed for WASM execution.
+func isKubernetesServiceEnv(name string) bool {
+	// Kubernetes service discovery env vars follow these patterns:
+	// - *_SERVICE_HOST (e.g., KUBERNETES_SERVICE_HOST)
+	// - *_SERVICE_PORT (e.g., KUBERNETES_SERVICE_PORT)
+	// - *_SERVICE_PORT_* (e.g., KUBERNETES_SERVICE_PORT_HTTPS)
+	// - *_PORT_*_TCP (e.g., KUACK_NODE_PORT_8080_TCP)
+	// - *_PORT_*_TCP_ADDR (e.g., KUACK_NODE_PORT_8080_TCP_ADDR)
+	// - *_PORT_*_TCP_PORT (e.g., KUACK_NODE_PORT_8080_TCP_PORT)
+	// - *_PORT_*_TCP_PROTO (e.g., KUACK_NODE_PORT_8080_TCP_PROTO)
+	// - *_PORT (e.g., KUACK_NODE_PORT, KUBERNETES_PORT)
+	return strings.HasSuffix(name, "_SERVICE_HOST") ||
+		strings.HasSuffix(name, "_SERVICE_PORT") ||
+		strings.Contains(name, "_SERVICE_PORT_") ||
+		strings.Contains(name, "_PORT_") && strings.Contains(name, "_TCP") ||
+		strings.HasSuffix(name, "_PORT") && !strings.Contains(name, "PATH")
+}
+
 var (
 	// ErrNoSuitableAgent is returned when no suitable agent is found for pod scheduling.
 	ErrNoSuitableAgent = errors.New("no suitable agent found")
@@ -717,17 +737,19 @@ type AgentPodSpec struct {
 	} `json:"spec"`
 }
 
+type AgentEnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
 // AgentContainerSpec represents a container spec in the agent format.
 type AgentContainerSpec struct {
-	Name    string   `json:"name"`
-	Image   string   `json:"image"`
-	Command []string `json:"command,omitempty"`
-	Args    []string `json:"args,omitempty"`
-	Env     []struct {
-		Name  string `json:"name"`
-		Value string `json:"value"`
-	} `json:"env,omitempty"`
-	Wasm *struct {
+	Name    string        `json:"name"`
+	Image   string        `json:"image"`
+	Command []string      `json:"command,omitempty"`
+	Args    []string      `json:"args,omitempty"`
+	Env     []AgentEnvVar `json:"env,omitempty"`
+	Wasm    *struct {
 		Type    string `json:"type,omitempty"`
 		Path    string `json:"path,omitempty"`
 		Variant string `json:"variant,omitempty"`
@@ -857,40 +879,7 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 		// defined in the Dockerfile (e.g., PYTHONHOME) which are otherwise lost in the WASM translation.
 		//
 		// Precedence: Pod Env overrides Image Env.
-		var envVars []struct {
-			Name  string `json:"name"`
-			Value string `json:"value"`
-		}
-
-		// Add Image Environment Variables (Base)
-		const keyValueParts = 2
-		for _, envStr := range wasmConfig.Env {
-			parts := strings.SplitN(envStr, "=", keyValueParts)
-			if len(parts) == keyValueParts {
-				envVars = append(envVars, struct {
-					Name  string `json:"name"`
-					Value string `json:"value"`
-				}{
-					Name:  parts[0],
-					Value: parts[1],
-				})
-			}
-		}
-
-		// Add/Override with Pod Environment Variables
-		if len(container.Env) > 0 {
-			for _, env := range container.Env {
-				envVars = append(envVars, struct {
-					Name  string `json:"name"`
-					Value string `json:"value"`
-				}{
-					Name:  env.Name,
-					Value: env.Value,
-				})
-			}
-		}
-
-		agentContainer.Env = envVars
+		agentContainer.Env = processEnvVars(wasmConfig, container)
 
 		// Support annotation overrides if present
 		if typeOverride, ok := pod.Annotations["kuack.io/wasm-type"]; ok {
@@ -1497,4 +1486,150 @@ func (rt *ResourceTracker) RemoveAgent(uuid string) {
 		mem.Sub(resources.Memory)
 		rt.totalCapacity[corev1.ResourceMemory] = mem
 	}
+}
+
+func processEnvVars(wasmConfig *registry.WasmConfig, container corev1.Container) []AgentEnvVar {
+	envVars := make([]AgentEnvVar, 0, len(wasmConfig.Env)+len(container.Env))
+
+	// Add Image Environment Variables (Base)
+	imageEnvCount := 0
+
+	const keyValueParts = 2
+
+	for _, envStr := range wasmConfig.Env {
+		imageEnvCount++
+
+		parts := strings.SplitN(envStr, "=", keyValueParts)
+		if len(parts) != keyValueParts {
+			continue
+		}
+
+		envName := parts[0]
+		envValue := parts[1]
+
+		// Filters out Kubernetes service discovery env vars if they somehow ended up in the image
+		if isKubernetesServiceEnv(envName) {
+			continue
+		}
+
+		// Truncate very long env var values to reduce iovec structures.
+		// The browser WASI shim has an iovec limit of 1024.
+		const maxEnvValueLength = 1024
+
+		truncatedValue := envValue
+		if len(envValue) > maxEnvValueLength {
+			truncatedValue = envValue[:maxEnvValueLength]
+			klog.V(logVerboseLevel).Infof("[Provider] Truncated env var %s value from %d to %d characters", envName, len(envValue), maxEnvValueLength)
+		}
+
+		envVars = append(envVars, AgentEnvVar{
+			Name:  envName,
+			Value: truncatedValue,
+		})
+	}
+
+	// Add/Override with Pod Environment Variables
+	// Filter out Kubernetes service discovery env vars (injected by Kubernetes, not needed for WASM)
+	// Also truncate long pod env var values to reduce iovec structures
+	if len(container.Env) > 0 {
+		const maxEnvValueLength = 1024
+
+		kubernetesServiceEnvCount := 0
+
+		for _, env := range container.Env {
+			// Filter out Kubernetes service discovery environment variables
+			if isKubernetesServiceEnv(env.Name) {
+				kubernetesServiceEnvCount++
+
+				continue
+			}
+
+			truncatedValue := env.Value
+			if len(env.Value) > maxEnvValueLength {
+				truncatedValue = env.Value[:maxEnvValueLength]
+				klog.V(logVerboseLevel).Infof("[Provider] Truncated pod env var %s value from %d to %d characters", env.Name, len(env.Value), maxEnvValueLength)
+			}
+
+			envVars = append(envVars, AgentEnvVar{
+				Name:  env.Name,
+				Value: truncatedValue,
+			})
+		}
+
+		if kubernetesServiceEnvCount > 0 {
+			klog.V(logVerboseLevel).Infof("[Provider] Filtered out %d Kubernetes service discovery environment variables from pod spec", kubernetesServiceEnvCount)
+		}
+	}
+
+	// Deduplicate environment variables, keeping the last occurrence.
+	latest := map[string]string{}
+
+	for _, env := range envVars {
+		if env.Name == "" {
+			continue
+		}
+
+		latest[env.Name] = env.Value
+	}
+
+	deduped := make([]AgentEnvVar, 0, len(latest))
+
+	seen := map[string]bool{}
+	for _, env := range envVars {
+		if env.Name == "" || seen[env.Name] {
+			continue
+		}
+
+		if latest[env.Name] == env.Value {
+			deduped = append(deduped, env)
+			seen[env.Name] = true
+		}
+	}
+
+	// Limit env vars to avoid "too many write (1025 > 1024)" error during WASI initialization.
+	const maxEnvVars = 100
+
+	originalEnvCount := len(deduped)
+
+	if len(deduped) > maxEnvVars {
+		// Identify which env vars come from the pod spec (user-specified)
+		podEnvNames := make(map[string]bool)
+		for _, env := range container.Env {
+			podEnvNames[env.Name] = true
+		}
+
+		// Separate pod env vars (must keep) from image env vars (can truncate)
+		podEnvs := make([]AgentEnvVar, 0)
+		imageEnvs := make([]AgentEnvVar, 0)
+
+		for _, env := range deduped {
+			if podEnvNames[env.Name] {
+				podEnvs = append(podEnvs, env)
+			} else {
+				imageEnvs = append(imageEnvs, env)
+			}
+		}
+
+		// Keep all pod env vars, drop image env vars to fit within limit
+		remainingSlots := maxEnvVars - len(podEnvs)
+		if remainingSlots < 0 {
+			remainingSlots = 0
+			// Use Warningf only when actually dropping pod envs or close to it, else Info
+			klog.Warningf("[Provider] Pod has %d user-specified env vars, exceeding limit of %d. All pod env vars will be kept, but this may cause iovec limit issues.", len(podEnvs), maxEnvVars)
+		}
+
+		// Keep the last remainingSlots image env vars (likely more relevant)
+		if remainingSlots > 0 && len(imageEnvs) > remainingSlots {
+			imageEnvs = imageEnvs[len(imageEnvs)-remainingSlots:]
+		}
+
+		// Combine
+		deduped = make([]AgentEnvVar, 0, len(podEnvs)+len(imageEnvs))
+		deduped = append(deduped, podEnvs...)
+		deduped = append(deduped, imageEnvs...)
+
+		klog.Warningf("[Provider] Limited environment variables from %d to %d (max %d) to avoid browser WASI shim iovec limit. Kept %d pod env vars.", originalEnvCount, len(deduped), maxEnvVars, len(podEnvs))
+	}
+
+	return deduped
 }

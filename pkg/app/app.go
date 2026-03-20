@@ -11,7 +11,6 @@ import (
 	httpserver "kuack-node/pkg/http"
 	"kuack-node/pkg/k8s"
 	"kuack-node/pkg/provider"
-	"kuack-node/pkg/registry"
 	tlsutil "kuack-node/pkg/tls"
 
 	"github.com/virtual-kubelet/virtual-kubelet/node"
@@ -71,17 +70,14 @@ type Components struct {
 
 // SetupComponents initializes and returns the main application components.
 func SetupComponents(ctx context.Context, cfg *config.Config) (*Components, error) {
-	// Create Registry Proxy (shared)
-	registryProxy := registry.NewProxy()
-
 	// Create the WASM provider
-	wasmProvider, err := newWASMProviderFunc(cfg.NodeName, registryProxy)
+	wasmProvider, err := newWASMProviderFunc(cfg.NodeName, cfg.RegistryURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create WASM provider: %w", err)
 	}
 
-	// Create Public Server (Agent + Registry)
-	publicServer, err := newPublicServerFunc(cfg.PublicPort, cfg.AgentToken, wasmProvider, registryProxy)
+	// Create Public Server (Agent WebSocket)
+	publicServer, err := newPublicServerFunc(cfg.PublicPort, cfg.AgentToken, wasmProvider)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create Public server: %w", err)
 	}

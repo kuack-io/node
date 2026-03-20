@@ -17,7 +17,6 @@ import (
 	"kuack-node/pkg/config"
 	httpserver "kuack-node/pkg/http"
 	"kuack-node/pkg/provider"
-	"kuack-node/pkg/registry"
 )
 
 var (
@@ -162,7 +161,7 @@ func TestSetupComponentsReturnsProviderError(t *testing.T) {
 	t.Cleanup(restore)
 
 	expectedErr := errProviderBoom
-	newWASMProviderFunc = func(_ string, _ registry.Resolver) (*provider.WASMProvider, error) {
+	newWASMProviderFunc = func(_ string, _ string) (*provider.WASMProvider, error) {
 		return nil, expectedErr
 	}
 
@@ -214,7 +213,7 @@ func TestSetupComponentsReturnsPublicServerError(t *testing.T) {
 	restore := lockAppDeps(t)
 	t.Cleanup(restore)
 
-	newPublicServerFunc = func(_ int, _ string, _ provider.AgentManager, _ *registry.Proxy) (*httpserver.PublicServer, error) {
+	newPublicServerFunc = func(_ int, _ string, _ provider.AgentManager) (*httpserver.PublicServer, error) {
 		return nil, errPublicServer
 	}
 

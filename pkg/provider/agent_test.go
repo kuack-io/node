@@ -124,7 +124,8 @@ func TestHasCapacity(t *testing.T) {
 func TestWASMProvider_AddAgent_AssignsPendingPods(t *testing.T) {
 	t.Parallel()
 
-	p, mockStream, agent := setupTestProvider(t)
+	p, mockStream, agent, cleanup := setupTestProvider(t)
+	defer cleanup()
 
 	// 1. Create a pending pod
 	pod := &corev1.Pod{
@@ -182,7 +183,8 @@ func TestWASMProvider_AddAgent_AssignsPendingPods(t *testing.T) {
 func TestWASMProvider_RemoveAgent(t *testing.T) {
 	t.Parallel()
 
-	p, _, agent := setupTestProvider(t)
+	p, _, agent, cleanup := setupTestProvider(t)
+	defer cleanup()
 
 	// Capture notifications
 	var (

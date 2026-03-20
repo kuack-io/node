@@ -2,11 +2,12 @@ package provider_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"kuack-node/pkg/provider"
-	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -31,36 +32,23 @@ func (m *MockAgentStream) WriteJSON(v any) error {
 	return args.Error(0)
 }
 
-type MockResolver struct {
-	mock.Mock
-}
-
-func (m *MockResolver) ResolveWasmConfig(ctx context.Context, imageRef string) (*registry.WasmConfig, error) {
-	args := m.Called(ctx, imageRef)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-
-	cfg, ok := args.Get(0).(*registry.WasmConfig)
-	if !ok {
-		// This should not happen in tests unless mock is set up incorrectly
-		panic("mock argument 0 is not *registry.WasmConfig")
-	}
-
-	return cfg, args.Error(1)
-}
-
-func setupTestProvider(t *testing.T) (*provider.WASMProvider, *MockAgentStream, *provider.AgentConnection) {
+// setupTestProvider creates a new WASM provider with a mock registry server.
+// It returns the provider, mock stream, agent, and a cleanup function.
+func setupTestProvider(t *testing.T) (*provider.WASMProvider, *MockAgentStream, *provider.AgentConnection, func()) {
 	t.Helper()
 
-	// Use MockResolver by default
-	mockResolver := new(MockResolver)
-	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{
-		Type: "wasi",
-		Path: "/test.wasm",
-	}, nil)
+	// Setup Mock Registry
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
 
-	p, err := provider.NewWASMProvider("node-1", mockResolver)
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// Set kubelet version using a fake Kubernetes client
@@ -84,5 +72,9 @@ func setupTestProvider(t *testing.T) (*provider.WASMProvider, *MockAgentStream, 
 		AllocatedPods: make(map[string]*corev1.Pod),
 	}
 
-	return p, mockStream, agent
+	cleanup := func() {
+		ts.Close()
+	}
+
+	return p, mockStream, agent, cleanup
 }

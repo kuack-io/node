@@ -43,7 +43,9 @@ type Config struct {
 	TLSKeyFile     string
 	AgentToken     string
 	KubeconfigPath string
-	Verbosity      int
+
+	Verbosity   int
+	RegistryURL string
 }
 
 // GetEnv returns the value of an environment variable or a default value if not set.
@@ -92,6 +94,7 @@ func LoadConfig(get EnvGetter) *Config {
 		AgentToken:     GetEnv(get, "AGENT_TOKEN", ""),
 		KubeconfigPath: GetEnv(get, "KUBECONFIG", ""),
 		Verbosity:      GetEnvInt(get, "KLOG_VERBOSITY", DefaultKlogVerbosity),
+		RegistryURL:    GetEnv(get, "REGISTRY_URL", "http://kuack-registry:8080"),
 	}
 }
 

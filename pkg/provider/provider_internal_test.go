@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"kuack-node/pkg/registry"
+	"kuack-node/pkg/registry_client"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,13 +17,13 @@ func TestProcessEnvVars(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		wasmConfig *registry.WasmConfig
+		wasmConfig *registry_client.WasmConfig
 		container  corev1.Container
 		want       []AgentEnvVar
 	}{
 		{
 			name: "basic image and pod envs",
-			wasmConfig: &registry.WasmConfig{
+			wasmConfig: &registry_client.WasmConfig{
 				Env: []string{"IMAGE_VAR=image_val"},
 			},
 			container: corev1.Container{
@@ -38,7 +38,7 @@ func TestProcessEnvVars(t *testing.T) {
 		},
 		{
 			name: "pod env overrides image env",
-			wasmConfig: &registry.WasmConfig{
+			wasmConfig: &registry_client.WasmConfig{
 				Env: []string{"COMMON_VAR=image_val"},
 			},
 			container: corev1.Container{
@@ -52,7 +52,7 @@ func TestProcessEnvVars(t *testing.T) {
 		},
 		{
 			name: "filter kubernetes service envs",
-			wasmConfig: &registry.WasmConfig{
+			wasmConfig: &registry_client.WasmConfig{
 				Env: []string{"APP_CONFIG=v1", "KUBERNETES_SERVICE_HOST=10.0.0.1"},
 			},
 			container: corev1.Container{
@@ -68,7 +68,7 @@ func TestProcessEnvVars(t *testing.T) {
 		},
 		{
 			name: "truncate long env values",
-			wasmConfig: &registry.WasmConfig{
+			wasmConfig: &registry_client.WasmConfig{
 				Env: []string{"LONG_IMAGE_VAR=" + strings.Repeat("a", 2000)},
 			},
 			container: corev1.Container{
@@ -83,13 +83,13 @@ func TestProcessEnvVars(t *testing.T) {
 		},
 		{
 			name:       "empty config and container",
-			wasmConfig: &registry.WasmConfig{},
+			wasmConfig: &registry_client.WasmConfig{},
 			container:  corev1.Container{},
 			want:       []AgentEnvVar{},
 		},
 		{
 			name: "invalid image env format",
-			wasmConfig: &registry.WasmConfig{
+			wasmConfig: &registry_client.WasmConfig{
 				Env: []string{"INVALID_FORMAT"},
 			},
 			container: corev1.Container{},
@@ -120,7 +120,7 @@ func TestProcessEnvVars_Limit(t *testing.T) {
 		{Name: "POD_VAR_2", Value: "val2"},
 	}
 
-	wasmConfig := &registry.WasmConfig{Env: imageEnvs}
+	wasmConfig := &registry_client.WasmConfig{Env: imageEnvs}
 	container := corev1.Container{Env: podEnvs}
 
 	got := processEnvVars(wasmConfig, container)

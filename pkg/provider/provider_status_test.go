@@ -2,11 +2,12 @@ package provider_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"kuack-node/pkg/provider"
-	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -20,7 +21,18 @@ import (
 func TestWASMProvider_GetPodStatus(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// 1. Add a pod
@@ -53,7 +65,18 @@ func TestWASMProvider_GetPodStatus(t *testing.T) {
 func TestWASMProvider_GetPods(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// 1. Add pods
@@ -89,7 +112,18 @@ func TestWASMProvider_GetPods(t *testing.T) {
 func TestWASMProvider_GetNode(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// Set kubelet version (required before GetNode())
@@ -132,7 +166,18 @@ func TestWASMProvider_GetNode(t *testing.T) {
 func TestWASMProvider_NotifyNodeStatus(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// Set kubelet version (required before GetNode())

@@ -41,7 +41,8 @@ func TestMetricsGaugeMutations(t *testing.T) { //nolint:paralleltest // global P
 
 func TestMetrics_AddAgent(t *testing.T) { //nolint:paralleltest
 	// Global metrics are shared state, so we cannot run this in parallel.
-	p, _, agent := setupTestProvider(t)
+	p, _, agent, cleanup := setupTestProvider(t)
+	defer cleanup()
 
 	// Initial count
 	initial := testutil.ToFloat64(provider.AgentsConnected)

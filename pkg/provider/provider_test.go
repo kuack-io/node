@@ -16,7 +16,9 @@ func TestProvider_Lifecycle(t *testing.T) {
 	t.Parallel()
 
 	// Create provider
-	p, mockStream, agent := setupTestProvider(t)
+	p, mockStream, agent, cleanup := setupTestProvider(t)
+	defer cleanup()
+
 	assert.NotNil(t, p)
 
 	// Set notify func
@@ -65,7 +67,9 @@ func TestProvider_Lifecycle(t *testing.T) {
 func TestProvider_UpdateAndStatus(t *testing.T) {
 	t.Parallel()
 
-	p, _, agent := setupTestProvider(t)
+	p, _, agent, cleanup := setupTestProvider(t)
+	defer cleanup()
+
 	p.NotifyPods(context.Background(), func(pod *corev1.Pod) {})
 
 	pod := testutil.NewPod("test-pod", "default", testutil.WithContainerResources("1", "1Gi"))

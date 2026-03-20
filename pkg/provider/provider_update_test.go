@@ -2,12 +2,13 @@ package provider_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"kuack-node/pkg/provider"
-	"kuack-node/pkg/registry"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -21,9 +22,19 @@ func TestWASMProvider_UpdatePodStatus(t *testing.T) {
 	t.Parallel()
 
 	// Use MockResolver
-	mockResolver := new(MockResolver)
-	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
-	p, err := provider.NewWASMProvider("node-1", mockResolver)
+	// Use Mock Registry via httptest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" { //nolint:goconst
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// 1. Setup agent and pod
@@ -105,7 +116,18 @@ func TestWASMProvider_UpdatePodStatus(t *testing.T) {
 func TestWASMProvider_UpdatePodStatus_NotFound(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	status := provider.AgentPodStatus{Phase: "Running"}
@@ -116,7 +138,18 @@ func TestWASMProvider_UpdatePodStatus_NotFound(t *testing.T) {
 func TestWASMProvider_UpdatePodStatus_InvalidPhase(t *testing.T) {
 	t.Parallel()
 
-	p, err := provider.NewWASMProvider("node-1", registry.NewProxy())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pod-1", Namespace: "default"}}

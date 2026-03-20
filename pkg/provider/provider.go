@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"kuack-node/pkg/registry"
+	"kuack-node/pkg/registry_client"
 
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 
@@ -85,8 +85,8 @@ type WASMProvider struct {
 	nodeName      string
 	nodeIP        string // Pod IP or service DNS name
 	agentRegistry *AgentRegistry
-	// registryResolver resolves WASM configuration from images.
-	registryResolver registry.Resolver
+	// registryClient interacts with the external registry service.
+	registryClient   *registry_client.Client
 	pods             sync.Map // namespace/name -> *corev1.Pod
 	podLogs          sync.Map // namespace/name -> *PodLogStream
 	resources        *ResourceTracker
@@ -222,8 +222,8 @@ func (s *PodLogStream) RemoveListener(l *LogListener) {
 }
 
 // NewWASMProvider creates a new WASM provider instance.
-func NewWASMProvider(nodeName string, registryResolver registry.Resolver) (*WASMProvider, error) {
-	klog.Infof("Initializing WASM provider for node: %s", nodeName)
+func NewWASMProvider(nodeName, registryURL string) (*WASMProvider, error) {
+	klog.Infof("Initializing WASM provider for node: %s, registry: %s", nodeName, registryURL)
 
 	// Detect node IP from environment (POD_IP) or use service name as fallback
 	nodeIP := os.Getenv("POD_IP")
@@ -236,13 +236,13 @@ func NewWASMProvider(nodeName string, registryResolver registry.Resolver) (*WASM
 	}
 
 	return &WASMProvider{
-		nodeName:         nodeName,
-		nodeIP:           nodeIP,
-		agentRegistry:    NewAgentRegistry(),
-		registryResolver: registryResolver,
-		resources:        NewResourceTracker(),
-		startTime:        time.Now(),
-		kubeletVersion:   "", // Must be set via SetKubeletVersionFromCluster
+		nodeName:       nodeName,
+		nodeIP:         nodeIP,
+		agentRegistry:  NewAgentRegistry(),
+		registryClient: registry_client.NewClient(registryURL),
+		resources:      NewResourceTracker(),
+		startTime:      time.Now(),
+		kubeletVersion: "", // Must be set via SetKubeletVersionFromCluster
 	}, nil
 }
 
@@ -834,7 +834,7 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 		// Resolve WASM configuration using registry inspector.
 		// Use a short 5s timeout to avoid blocking pod scheduling if registry is slow.
 		resolveCtx, resolveCancel := context.WithTimeout(ctx, registryResolveTimeout)
-		wasmConfig, err := p.registryResolver.ResolveWasmConfig(resolveCtx, container.Image)
+		wasmConfig, err := p.registryClient.ResolveWasmConfig(resolveCtx, container.Image)
 
 		resolveCancel()
 
@@ -842,7 +842,7 @@ func (p *WASMProvider) convertPodToAgentSpec(ctx context.Context, pod *corev1.Po
 			// Fallback if inspection fails
 			klog.Warningf("Failed to resolve WASM config for %s: %v. Falling back to default WASI.", container.Image, err)
 
-			wasmConfig = &registry.WasmConfig{
+			wasmConfig = &registry_client.WasmConfig{
 				Type:    "wasi",
 				Path:    "/output.wasm",
 				Variant: "wasm32/wasi",
@@ -1488,7 +1488,7 @@ func (rt *ResourceTracker) RemoveAgent(uuid string) {
 	}
 }
 
-func processEnvVars(wasmConfig *registry.WasmConfig, container corev1.Container) []AgentEnvVar {
+func processEnvVars(wasmConfig *registry_client.WasmConfig, container corev1.Container) []AgentEnvVar {
 	envVars := make([]AgentEnvVar, 0, len(wasmConfig.Env)+len(container.Env))
 
 	// Add Image Environment Variables (Base)

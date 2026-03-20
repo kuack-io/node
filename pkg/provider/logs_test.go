@@ -3,17 +3,16 @@ package provider_test
 import (
 	"context"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"kuack-node/pkg/provider"
 
-	"kuack-node/pkg/registry"
-
 	"github.com/virtual-kubelet/virtual-kubelet/node/api"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -78,9 +77,18 @@ func TestPodLogStream_WriteAndRead_Follow(t *testing.T) {
 func TestWASMProvider_GetContainerLogs(t *testing.T) {
 	t.Parallel()
 
-	mockResolver := new(MockResolver)
-	mockResolver.On("ResolveWasmConfig", mock.Anything, mock.Anything).Return(&registry.WasmConfig{Type: "wasi", Path: "/test.wasm"}, nil)
-	p, err := provider.NewWASMProvider("node-1", mockResolver)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/resolve" {
+			_, _ = w.Write([]byte(`{"type":"wasi","path":"/test.wasm"}`))
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+
+	p, err := provider.NewWASMProvider("node-1", ts.URL)
 	require.NoError(t, err)
 
 	// 1. Get logs (follow=true)
